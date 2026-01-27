@@ -23,7 +23,11 @@
       "Bash(del \"D:\\\\EvgeniDoc\\\\My Codebases\\\\claude-mcp-email\\\\test-body.ts\")",
       "Bash(git init:*)",
       "Bash(git remote add:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: Email sync and classification system\n\n- IMAP email fetching with mailparser for proper MIME decoding\n- Thread grouping by subject/references\n- AI classification \\(quote_request, po_received, action_needed, no_action, not_customer\\)\n- Next.js UI with job board view\n- SQLite database with Drizzle ORM\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git remote set-url:*)"
     ]
   }
 }

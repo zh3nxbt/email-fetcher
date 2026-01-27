@@ -26,16 +26,23 @@ All initial implementation tasks have been completed. The project is now using:
 npm run dev          # Start Next.js dev server
 
 # Database
-npm run db:push      # Push schema changes to Supabase
+npm run db:push      # Push schema changes to database
 npm run db:studio    # Open Drizzle Studio
+npm run db:reset     # Clear all data (emails + threads)
 
-# Email Sync
-npm run sync         # Run IMAP sync + AI classification
+# Email Sync & Classification
+npm run sync         # Full sync: fetch emails + classify threads
+npm run reclassify   # Re-classify only (keeps emails, re-runs AI)
 
 # Build
 npm run build        # Production build
 npm run typecheck    # TypeScript check
 ```
+
+### When to use which command:
+- **Changed classification prompt?** → `npm run reclassify`
+- **Fixed email fetching bug?** → `npm run db:reset && npm run sync`
+- **Just want fresh AI classifications?** → `npm run reclassify`
 
 ---
 
@@ -146,6 +153,11 @@ Add unit and integration tests for critical paths.
 - [x] Add pagination to thread list API
 - [x] Add batch processing to prevent OOM
 - [x] Rename tables with `email_` prefix
+- [x] Fix email body decoding (use mailparser instead of manual decoding)
+- [x] Fix IMAP hanging issue (don't nest fetchOne in fetch iterator)
+- [x] Fix customer vs vendor classification (outgoing POs/quotes = no_action)
+- [x] Add `npm run reclassify` command (re-classify without re-fetching)
+- [x] Fix `in_reply_to` and `references` field parsing
 
 ---
 

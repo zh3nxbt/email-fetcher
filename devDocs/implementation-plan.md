@@ -43,7 +43,7 @@ A **Job Flow Tracker** that:
 | Framework | Next.js 15 |
 | Database | **Supabase PostgreSQL** + Drizzle ORM |
 | DB Driver | `postgres` (via pooler connection) |
-| IMAP | imapflow |
+| IMAP | imapflow + mailparser |
 | Classification | Claude Haiku API (@anthropic-ai/sdk) |
 | UI | Tailwind + shadcn/ui |
 
@@ -102,6 +102,19 @@ npm run db:studio    # Open Drizzle Studio
 ## Thread Classification with Claude Haiku
 
 **Key insight:** Classify the **entire thread**, not individual emails. The LLM reads the conversation and determines the current state.
+
+### Critical: Customer vs Vendor Distinction
+
+MAS Precision Parts is OUR company. We must distinguish:
+
+| Scenario | Classification |
+|----------|----------------|
+| Customer sends US a PO | `po_received` ✓ |
+| WE send a PO to vendor | `no_action` (we're buying) |
+| Customer asks US for quote | `quote_request` ✓ |
+| WE ask vendor for quote | `no_action` (we're buying) |
+
+**Rule:** If the FIRST email in a thread is [SENT] by us, we initiated the conversation = likely vendor/supplier interaction, NOT a customer.
 
 **Prompt for each thread:**
 ```
@@ -207,13 +220,42 @@ This ensures status stays current as conversations evolve.
 
 ---
 
+## Email Fetching Best Practices
+
+### Use mailparser for MIME decoding
+ImapFlow's `fetchOne({ source: true })` returns raw email bytes. Use `mailparser.simpleParser()` to decode:
+- Base64 encoded content
+- Quoted-printable encoding
+- Charset conversion (UTF-8, ISO-8859-1, etc.)
+
+### Avoid IMAP command conflicts
+**DON'T** nest `fetchOne()` inside `fetch()` iterator - causes hangs:
+```typescript
+// BAD - hangs!
+for await (const msg of client.fetch(uids)) {
+  await client.fetchOne(msg.uid, {...});
+}
+```
+
+**DO** collect UIDs first, then fetch individually:
+```typescript
+// GOOD
+for (const uid of uidsToSync) {
+  const msg = await client.fetchOne(uid, { source: true });
+}
+```
+
+---
+
 ## Verification Plan
 
-1. **Sync test**: Emails fetched and stored in Supabase
+1. **Sync test**: Emails fetched and stored in database
 2. **Threading test**: Related emails grouped together
 3. **Classification test**:
    - "Thank you" email → no_action
    - "We'll get back to you" from us → action_needed
-   - "Can I get a quote?" → quote_request
-   - PO attachment → po_received
+   - "Can I get a quote?" from customer → quote_request
+   - WE ask vendor for quote → no_action (not quote_request!)
+   - PO from customer → po_received
+   - WE send PO to vendor → no_action (not po_received!)
 4. **UI test**: 3 columns display correctly, no_action threads hidden
