@@ -65,8 +65,21 @@ If AI misclassifies a PO as "general", the system detects POs from subject patte
 
 ### Todo Resolution Logic
 
-A todo is resolved when **we send ANY email** in that thread during the time window, not just if the last email is from us. This handles:
+A todo is resolved in two ways:
+
+**1. Automatic Resolution (email activity):**
+- When **we send ANY email** in that thread during the time window
 - Customer sends PO → We acknowledge → Customer says "Thanks!" → **TODO IS RESOLVED** (we replied)
+
+**2. Manual Dismissal (user clicks "Mark Complete"):**
+- Adds threadKey to `dismissed_threads` table (persists across report regeneration)
+- Future reports will NOT recreate todos for dismissed threadKeys
+- Can be un-dismissed via `DELETE /api/dismissed-threads` with `{ threadKey }`
+
+**Why two mechanisms?**
+- Auto-resolution is based on email activity in current report window
+- Manual dismissal is permanent until explicitly un-dismissed
+- This prevents manually resolved todos from reappearing when customers send follow-up emails
 
 ### UI Labels
 - **Todo labels**: "Need to Ack PO", "Need to Send Quote", "Need to Reply"
@@ -318,6 +331,7 @@ src/
 - **daily_reports**: Generated reports with metrics and HTML
 - **report_threads**: Categorized thread summaries per report
 - **todo_items**: Action items identified in reports
+- **dismissed_threads**: Manually dismissed threadKeys (persists across report regeneration)
 
 ## Scheduling
 

@@ -73,6 +73,14 @@ export const todoItems = pgTable("email_todo_items", {
   resolvedAt: timestamp("resolved_at"),
 });
 
+// Dismissed threads - tracks manually dismissed threadKeys (persists across report regeneration)
+export const dismissedThreads = pgTable("email_dismissed_threads", {
+  id: serial("id").primaryKey(),
+  threadKey: text("thread_key").notNull().unique(),
+  dismissedAt: timestamp("dismissed_at").notNull(),
+  reason: text("reason"), // "manual" or "auto"
+});
+
 // Type exports
 export type Email = typeof emails.$inferSelect;
 export type NewEmail = typeof emails.$inferInsert;
@@ -82,6 +90,8 @@ export type ReportThread = typeof reportThreads.$inferSelect;
 export type NewReportThread = typeof reportThreads.$inferInsert;
 export type TodoItem = typeof todoItems.$inferSelect;
 export type NewTodoItem = typeof todoItems.$inferInsert;
+export type DismissedThread = typeof dismissedThreads.$inferSelect;
+export type NewDismissedThread = typeof dismissedThreads.$inferInsert;
 
 export type ReportType = "daily_summary" | "morning_reminder";
 export type Category = "customer" | "vendor" | "other";

@@ -122,6 +122,15 @@ async function markTodosResolved(todoIds: number[]): Promise<void> {
     .where(inArray(schema.todoItems.id, todoIds));
 }
 
+// Get all manually dismissed threadKeys (persists across report regeneration)
+async function getDismissedThreadKeys(): Promise<Set<string>> {
+  const dismissed = await db
+    .select({ threadKey: schema.dismissedThreads.threadKey })
+    .from(schema.dismissedThreads);
+
+  return new Set(dismissed.map((d) => d.threadKey));
+}
+
 // Get the 7am report from the same day (for 4pm report)
 async function getSameDayMorningReport(forDate: Date) {
   const dateStr = forDate.toISOString().split("T")[0];
@@ -238,8 +247,15 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
 
   // Filter out new todos that are duplicates of morning todos (by threadKey)
   const morningThreadKeys = new Set(morningTodosWithStatus.map(t => t.threadKey));
-  const trulyNewTodos = newTodosRaw.filter(t => !morningThreadKeys.has(t.threadKey));
-  console.log(`  ${trulyNewTodos.length} are genuinely new (not carry-over)`);
+
+  // Also filter out manually dismissed threads (persists across report regeneration)
+  const dismissedThreadKeys = await getDismissedThreadKeys();
+  console.log(`  ${dismissedThreadKeys.size} threads previously dismissed`);
+
+  const trulyNewTodos = newTodosRaw.filter(t =>
+    !morningThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
+  );
+  console.log(`  ${trulyNewTodos.length} are genuinely new (not carry-over or dismissed)`);
 
   // Convert new todos to DisplayTodo format (all unresolved)
   const newTodosDisplay: DisplayTodo[] = trulyNewTodos.map(t => ({
@@ -250,8 +266,20 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
   // Combine for display: morning todos (with resolved status) + new todos
   const displayTodos: DisplayTodo[] = [...morningTodosWithStatus, ...newTodosDisplay];
 
-  // For DB insertion, only save unresolved new todos (morning todos are already in DB)
-  const todosForDb: IdentifiedTodo[] = trulyNewTodos;
+  // For DB insertion: save BOTH unresolved morning todos AND new todos
+  // This ensures the chain continues: 7am → 4pm → next 7am can find them
+  const unresolvedMorningTodos: IdentifiedTodo[] = morningTodosWithStatus
+    .filter(t => !t.resolved)
+    .map(t => ({
+      threadKey: t.threadKey,
+      todoType: t.todoType,
+      description: t.description,
+      contactEmail: t.contactEmail,
+      contactName: t.contactName,
+      originalDate: t.originalDate,
+      subject: t.subject,
+    }));
+  const todosForDb: IdentifiedTodo[] = [...unresolvedMorningTodos, ...trulyNewTodos];
 
   const unresolvedCount = displayTodos.filter(t => !t.resolved).length;
   const resolvedCount = displayTodos.filter(t => t.resolved).length;
@@ -337,8 +365,39 @@ export async function generateMorningReminder(options: ReportOptions = {}): Prom
   const { received: overnightReceived, sent: overnightSent } = countEmailsByDirection(emails);
   console.log(`  Found ${overnightEmails.length} threads (${overnightReceived} received, ${overnightSent} sent)`);
 
-  // Step 3: Generate HTML
-  console.log("\nStep 3: Generating report...");
+  // Step 3: Identify NEW action items from overnight emails
+  console.log("\nStep 3: Identifying new action items from overnight emails...");
+  const overnightTodosRaw = identifyTodos(overnightEmails);
+
+  // Filter out duplicates (already in pending todos from yesterday)
+  const pendingThreadKeys = new Set(pendingTodos.map(t => t.threadKey));
+
+  // Also filter out manually dismissed threads (persists across report regeneration)
+  const dismissedThreadKeys = await getDismissedThreadKeys();
+  console.log(`  ${dismissedThreadKeys.size} threads previously dismissed`);
+
+  const newOvernightTodos = overnightTodosRaw.filter(t =>
+    !pendingThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
+  );
+  console.log(`  Found ${newOvernightTodos.length} new action items from overnight emails (excluding dismissed)`);
+
+  // Add new overnight todos to pending list (for display and saving)
+  for (const todo of newOvernightTodos) {
+    pendingTodos.push({
+      id: 0, // Will be assigned when saved
+      threadKey: todo.threadKey,
+      todoType: todo.todoType,
+      description: todo.description,
+      contactEmail: todo.contactEmail,
+      contactName: todo.contactName,
+      originalDate: todo.originalDate,
+      subject: todo.subject,
+      resolved: false,
+    });
+  }
+
+  // Step 4: Generate HTML
+  console.log("\nStep 4: Generating report...");
   const data: MorningReportData = {
     pendingTodos,
     overnightEmails,

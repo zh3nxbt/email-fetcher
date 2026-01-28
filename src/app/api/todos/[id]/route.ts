@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 // Mark a todo as resolved by ID
 export async function PATCH(
@@ -43,6 +43,16 @@ export async function PATCH(
         })
         .where(eq(schema.todoItems.threadKey, threadKey));
 
+      // Also add to dismissed_threads to persist across report regeneration
+      await db
+        .insert(schema.dismissedThreads)
+        .values({
+          threadKey,
+          dismissedAt: new Date(),
+          reason: "manual",
+        })
+        .onConflictDoNothing(); // Ignore if already dismissed
+
       return NextResponse.json({
         success: true,
         resolvedCount: todos.length,
@@ -76,6 +86,16 @@ export async function PATCH(
         resolvedAt: new Date(),
       })
       .where(eq(schema.todoItems.id, todoId));
+
+    // Also add to dismissed_threads to persist across report regeneration
+    await db
+      .insert(schema.dismissedThreads)
+      .values({
+        threadKey: todo.threadKey,
+        dismissedAt: new Date(),
+        reason: "manual",
+      })
+      .onConflictDoNothing(); // Ignore if already dismissed
 
     return NextResponse.json({
       success: true,

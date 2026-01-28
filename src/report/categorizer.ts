@@ -10,114 +10,6 @@ const MAX_THREADS_PER_BATCH = 20;
 
 const OUR_DOMAIN = process.env.IMAP_USER?.split("@")[1]?.toLowerCase() || "masprecisionparts.com";
 
-// Check if email has real attachments (PDFs, documents) vs just signature images
-function hasRealAttachments(email: Email): boolean {
-  if (!email.attachments) return false;
-
-  try {
-    const attachments = JSON.parse(email.attachments) as Array<{
-      filename?: string;
-      contentType?: string;
-      size?: number;
-    }>;
-
-    // Real attachments are PDFs, Office docs, etc. - not images typically used in signatures
-    const signatureImagePatterns = [
-      /^image\/(png|jpeg|jpg|gif)$/i,
-      /logo/i,
-      /signature/i,
-      /image\d+\.(png|jpg|jpeg|gif)$/i,
-    ];
-
-    for (const att of attachments) {
-      const filename = att.filename?.toLowerCase() || "";
-      const contentType = att.contentType?.toLowerCase() || "";
-
-      // Skip small images (likely signature images, typically < 100KB)
-      if (contentType.startsWith("image/") && (att.size || 0) < 100000) {
-        continue;
-      }
-
-      // Skip files that look like signature images
-      if (signatureImagePatterns.some(p => p.test(filename) || p.test(contentType))) {
-        if ((att.size || 0) < 100000) continue;
-      }
-
-      // This looks like a real attachment (PDF, doc, large file, etc.)
-      if (
-        contentType.includes("pdf") ||
-        contentType.includes("document") ||
-        contentType.includes("spreadsheet") ||
-        contentType.includes("msword") ||
-        contentType.includes("excel") ||
-        contentType.includes("application/") ||
-        filename.endsWith(".pdf") ||
-        filename.endsWith(".doc") ||
-        filename.endsWith(".docx") ||
-        filename.endsWith(".xls") ||
-        filename.endsWith(".xlsx") ||
-        (att.size || 0) > 100000 // Large files are likely real attachments
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  } catch {
-    // If we can't parse, assume no real attachments
-    return false;
-  }
-}
-
-// Detect simple acknowledgment emails that don't need a response
-function isSimpleAcknowledgment(bodyText: string | null): boolean {
-  if (!bodyText) return false;
-
-  // Get first 200 chars, lowercase, and strip whitespace/signatures
-  const firstPart = bodyText.slice(0, 200).toLowerCase().trim();
-
-  // Extract text before common signature markers
-  const beforeSignature = firstPart.split(/\n\s*[-_]{2,}|\n\s*sent from|\n\s*get outlook|\n\s*\[/)[0].trim();
-
-  // Very short messages that are ONLY acknowledgments (strict patterns)
-  // These must match the ENTIRE message before signature
-  const strictAckPatterns = [
-    /^(great )?thanks?!?\.?$/,
-    /^thank you!?\.?$/,
-    /^thanks!? ?so much!?\.?$/,
-    /^got it!?\.?$/,
-    /^sounds good!?\.?$/,
-    /^perfect!?\.?$/,
-    /^received!?\.?$/,
-    /^ok!?\.?$/,
-    /^okay!?\.?$/,
-    /^will do!?\.?$/,
-    /^noted!?\.?$/,
-    /^acknowledged!?\.?$/,
-    /^awesome!?\.?$/,
-    /^great!?\.?$/,
-  ];
-
-  for (const pattern of strictAckPatterns) {
-    if (pattern.test(beforeSignature)) {
-      return true;
-    }
-  }
-
-  // Also check for acknowledgment followed only by name/closing
-  // e.g., "Great thanks!\n\nPreet" or "Thanks!\nBest,\nJohn"
-  const ackWithClosingPattern = /^(great )?thanks?!?\.?\s*([\n\r]+\s*[a-z]+)?$/;
-  if (ackWithClosingPattern.test(beforeSignature) && beforeSignature.length < 40) {
-    return true;
-  }
-
-  // IMPORTANT: Do NOT match phrases like "Thank you and kind regards" or
-  // "Thank you, please find attached" - these are polite openings, not acknowledgments
-  // The patterns above are strict and require the message to be ONLY the acknowledgment
-
-  return false;
-}
-
 // Fetch emails within a time window
 export async function fetchEmailsInWindow(window: TimeWindow): Promise<Email[]> {
   const emails = await db
@@ -428,42 +320,76 @@ export async function categorizeThreads(window: TimeWindow): Promise<Categorized
       }
     }
 
-    // Determine if response is needed:
-    // - Not needed if last email is from us
-    // - Not needed if last email is a simple acknowledgment (thanks, got it, etc.)
-    // - Check for acknowledgment FIRST (signature images count as "attachments" but aren't real)
-    // - If NOT an acknowledgment and has real attachments (PDF, etc.), needs response
-    // - Otherwise use AI's assessment, defaulting to true
-    let needsResponse = true;
-    if (lastEmailFromUs) {
-      needsResponse = false;
-    } else if (isSimpleAcknowledgment(lastEmail?.bodyText)) {
-      // Simple acknowledgments don't need response, even if they have signature images
-      needsResponse = false;
-    } else if (lastEmail?.hasAttachments && hasRealAttachments(lastEmail)) {
-      // Emails with REAL attachments (PDF, documents) need a response
-      needsResponse = true;
-    } else {
-      needsResponse = aiResult?.needsResponse ?? true;
-    }
-
-    // Determine item type - use AI result but override if subject clearly indicates PO
+    // Determine item type - use AI result but apply safety nets for obvious patterns
     let itemType = aiResult?.itemType ?? "general";
     const subjectLower = (firstEmail.subject || "").toLowerCase();
     const category = aiResult?.category ?? data.initialCategory;
 
-    // If it's a customer thread and subject clearly indicates a PO, mark as po_received
+    // PO safety net: If it's a customer thread and subject clearly indicates a PO
     if (category === "customer" && itemType === "general") {
-      if (
-        subjectLower.includes("po number") ||
-        subjectLower.includes("po attached") ||
-        subjectLower.includes("po#") ||
-        subjectLower.includes("purchase order") ||
-        /\bpo\s*\d+/i.test(subjectLower) ||  // "PO 12345" or "PO12345"
-        /\bpo\d{5,}/i.test(subjectLower)     // "PO00221" style
-      ) {
+      const poPatterns = [
+        /\bpo\s*#?\d+/i,           // "PO 12345", "PO#12345", "PO12345"
+        /purchase\s*order/i,       // "Purchase Order"
+        /\bpo\s+attached/i,        // "PO attached"
+        /\bpo\s+number/i,          // "PO number"
+        /please\s+proceed\s+with.*order/i,  // "Please proceed with the order"
+        /go\s+ahead\s+with.*quote/i,        // "Go ahead with quote #X"
+        /placing\s+an?\s+order/i,           // "Placing an order"
+      ];
+
+      if (poPatterns.some(p => p.test(subjectLower))) {
+        console.warn(`Safety net: PO pattern in "${firstEmail.subject}" but AI said general`);
         itemType = "po_received";
       }
+    }
+
+    // RFQ safety net: If it's a customer thread and subject indicates a quote request
+    if (category === "customer" && itemType === "general") {
+      const rfqPatterns = [
+        /\brfq\b/i,                    // "RFQ"
+        /request\s+for\s+quot/i,       // "Request for quote/quotation"
+        /please\s+quote/i,             // "Please quote"
+        /quote\s+request/i,            // "Quote request"
+        /pricing\s+request/i,          // "Pricing request"
+        /need\s+a\s+quote/i,           // "Need a quote"
+        /send\s+(us\s+)?a\s+quote/i,   // "Send us a quote"
+      ];
+
+      if (rfqPatterns.some(p => p.test(subjectLower))) {
+        console.warn(`Safety net: RFQ pattern in "${firstEmail.subject}" but AI said general`);
+        itemType = "quote_request";
+      }
+    }
+
+    // Quotation safety net: If we sent a quotation/quote/estimate, it implies an RFQ
+    // (customer may have called or asked in person - no email trace of the request)
+    if (category === "customer" && itemType === "general") {
+      const quotationPatterns = [
+        /^quotation\b/i,               // "Quotation 2065"
+        /^quote\s*#?\d*/i,             // "Quote #123" or "Quote 123"
+        /^estimate\s*#?\d*/i,          // "Estimate #123"
+        /\bquotation\s*#?\d+/i,        // "Quotation #2065"
+        /\best[_\s]*\d+/i,             // "Est_123" or "Est 123"
+      ];
+
+      if (quotationPatterns.some(p => p.test(subjectLower))) {
+        console.warn(`Safety net: Quotation pattern in "${firstEmail.subject}" - treating as RFQ`);
+        itemType = "quote_request";
+      }
+    }
+
+    // Determine if response is needed:
+    // - Not needed if last email is from us
+    // - POs and RFQs ALWAYS need a response (override AI)
+    // - Otherwise trust AI's assessment
+    let needsResponse = !lastEmailFromUs && (aiResult?.needsResponse ?? true);
+
+    // Safety net: POs and RFQs always need acknowledgment, regardless of AI assessment
+    if (!lastEmailFromUs && (itemType === "po_received" || itemType === "quote_request")) {
+      if (!needsResponse) {
+        console.warn(`Safety net: ${itemType} "${firstEmail.subject}" - forcing needsResponse=true`);
+      }
+      needsResponse = true;
     }
 
     categorizedThreads.push({

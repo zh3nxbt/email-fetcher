@@ -92,13 +92,33 @@ For EACH thread, determine:
    - "general" = General inquiry, conversation, OR we sent invoice/quotation to customer
    - "other" = Automated, newsletter, unrelated
 
+   PURCHASE ORDER DETECTION - Mark as "po_received" (customer) or "po_sent" (vendor) when you see:
+   - Explicit: "PO #12345", "Purchase Order", "PO attached", "PO number"
+   - Implicit orders: "Please proceed with the order", "Go ahead with quote #X", "We'd like to place an order"
+   - Regional variations: "Purchase requisition", "Blanket order", "Call-off order"
+   - PDF attachments named like: "PO_*.pdf", "Purchase*.pdf", "Order*.pdf"
+
+   QUOTE REQUEST DETECTION - Mark as "quote_request" when you see:
+   - Explicit: "RFQ", "Request for quote", "Please quote", "Quotation request"
+   - Implicit: "What would it cost...", "Can you provide pricing...", "How much for..."
+   - Capability inquiries: "Do you manufacture X?", "Can you make these parts?"
+
 3. CONTACT_NAME - The person/company name from the external party
 
 4. SUMMARY - A 1-2 sentence summary of the thread's key content/status
 
 5. NEEDS_RESPONSE - Does the LAST email in this thread require a response from us?
-   - true = The customer asked a question, made a request, or expects action from us
-   - false = The last email is a simple acknowledgment like "thanks", "thank you", "great thanks", "sounds good", "got it", "perfect", "received", or similar - NO response needed
+   Set to FALSE (no response needed) for simple acknowledgments:
+   - Standard: "Thanks!", "Thank you!", "Got it!", "Perfect!", "Received!"
+   - Natural variations: "That works!", "Sounds good!", "Confirmed!", "Noted with thanks!"
+   - Short forms: "OK", "K", "👍", "Cheers", "Ta", "Much appreciated"
+   - Closings: "Great, thanks!" followed by signature
+
+   Set to TRUE (response needed) when:
+   - Follow-up expected: "Thanks, we'll review and get back to you"
+   - Has substantial content: "Thank you, please find attached our PO"
+   - Contains question: "Got it. When can you ship?"
+   - Makes a request: "Thanks! Also, can you expedite this?"
 
 6. RELATED_TO - If this thread is clearly a RESPONSE to another thread (e.g., a vendor quote/estimate that responds to our RFQ), provide the threadKey of that related thread. Look for:
    - Quotes/Estimates that respond to RFQs we sent (same vendor, matching part numbers, timing)
@@ -233,13 +253,33 @@ Analyze this thread and provide:
    - "general" = General inquiry, conversation, OR we sent invoice/quotation to customer
    - "other" = Automated, newsletter, unrelated
 
+   PURCHASE ORDER DETECTION - Mark as "po_received" (customer) or "po_sent" (vendor) when you see:
+   - Explicit: "PO #12345", "Purchase Order", "PO attached", "PO number"
+   - Implicit orders: "Please proceed with the order", "Go ahead with quote #X", "We'd like to place an order"
+   - Regional variations: "Purchase requisition", "Blanket order", "Call-off order"
+   - PDF attachments named like: "PO_*.pdf", "Purchase*.pdf", "Order*.pdf"
+
+   QUOTE REQUEST DETECTION - Mark as "quote_request" when you see:
+   - Explicit: "RFQ", "Request for quote", "Please quote", "Quotation request"
+   - Implicit: "What would it cost...", "Can you provide pricing...", "How much for..."
+   - Capability inquiries: "Do you manufacture X?", "Can you make these parts?"
+
 3. CONTACT_NAME - The person/company name from the external party (customer or vendor)
 
 4. SUMMARY - A 1-2 sentence summary of the thread's key content/status
 
 5. NEEDS_RESPONSE - Does the LAST email in this thread require a response from us?
-   - true = The customer asked a question, made a request, or expects action from us
-   - false = The last email is a simple acknowledgment like "thanks", "thank you", "great thanks", "sounds good", "got it", "perfect", "received", or similar - NO response needed
+   Set to FALSE (no response needed) for simple acknowledgments:
+   - Standard: "Thanks!", "Thank you!", "Got it!", "Perfect!", "Received!"
+   - Natural variations: "That works!", "Sounds good!", "Confirmed!", "Noted with thanks!"
+   - Short forms: "OK", "K", "👍", "Cheers", "Ta", "Much appreciated"
+   - Closings: "Great, thanks!" followed by signature
+
+   Set to TRUE (response needed) when:
+   - Follow-up expected: "Thanks, we'll review and get back to you"
+   - Has substantial content: "Thank you, please find attached our PO"
+   - Contains question: "Got it. When can you ship?"
+   - Makes a request: "Thanks! Also, can you expedite this?"
 
 Respond with JSON only, no markdown:
 {"category": "customer|vendor|other", "item_type": "po_received|po_sent|quote_request|general|other", "contact_name": "name or null", "summary": "brief summary", "needs_response": true|false}`;
