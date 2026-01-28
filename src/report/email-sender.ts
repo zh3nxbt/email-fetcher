@@ -10,19 +10,37 @@ interface SmtpConfig {
 }
 
 function getSmtpConfig(): SmtpConfig {
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const provider = process.env.SMTP_PROVIDER || "direct";
+
+  let host: string | undefined;
+  let port: number;
+  let user: string | undefined;
+  let pass: string | undefined;
+
+  if (provider === "smtp2go") {
+    host = process.env.SMTP2GO_HOST || "mail.smtp2go.com";
+    port = parseInt(process.env.SMTP2GO_PORT || "2525", 10);
+    user = process.env.SMTP2GO_USER;
+    pass = process.env.SMTP2GO_PASS;
+  } else {
+    host = process.env.SMTP_HOST;
+    port = parseInt(process.env.SMTP_PORT || "587", 10);
+    user = process.env.SMTP_USER;
+    pass = process.env.SMTP_PASS;
+  }
 
   if (!host || !user || !pass) {
     throw new Error(
-      "Missing SMTP credentials. Set SMTP_HOST, SMTP_USER, and SMTP_PASS."
+      `Missing SMTP credentials for provider "${provider}". ` +
+      (provider === "smtp2go"
+        ? "Set SMTP2GO_HOST, SMTP2GO_USER, and SMTP2GO_PASS."
+        : "Set SMTP_HOST, SMTP_USER, and SMTP_PASS.")
     );
   }
 
   return {
     host,
-    port: parseInt(process.env.SMTP_PORT || "587", 10),
+    port,
     secure: process.env.SMTP_SECURE === "true",
     user,
     pass,
