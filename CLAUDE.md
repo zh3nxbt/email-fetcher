@@ -338,3 +338,21 @@ src/
 Use Windows Task Scheduler or cron:
 - `npm run report` at 4pm EST daily
 - `npm run report:morning` at 7am EST daily
+
+## Git / SSH
+
+This repo uses SSH with a custom host alias. The remote is configured as:
+```
+git@github-zh3n:zh3nxbt/email-fetcher.git
+```
+
+This uses the `github-zh3n` alias defined in `~/.ssh/config`:
+```
+Host github-zh3n
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_github_zh3n
+  IdentitiesOnly yes
+```
+
+**Important:** Use `github-zh3n` instead of `github.com` in the remote URL to use the correct SSH key.
