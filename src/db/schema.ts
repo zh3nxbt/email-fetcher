@@ -1,5 +1,12 @@
-import { pgTable, text, integer, serial, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, serial, timestamp, boolean, date, jsonb, pgEnum } from "drizzle-orm/pg-core";
 
+// Enums
+export const reportTypeEnum = pgEnum("email_report_type", ["daily_summary", "morning_reminder"]);
+export const categoryEnum = pgEnum("email_category", ["customer", "vendor", "other"]);
+export const itemTypeEnum = pgEnum("email_item_type", ["po_sent", "po_received", "quote_request", "general", "other"]);
+export const todoTypeEnum = pgEnum("email_todo_type", ["po_unacknowledged", "quote_unanswered", "general_unanswered"]);
+
+// Email messages
 export const emails = pgTable("email_messages", {
   id: serial("id").primaryKey(),
   uid: integer("uid").notNull(),
@@ -18,37 +25,65 @@ export const emails = pgTable("email_messages", {
   syncedAt: timestamp("synced_at").notNull(),
 });
 
-export const threads = pgTable("email_threads", {
+// Daily reports
+export const dailyReports = pgTable("email_daily_reports", {
   id: serial("id").primaryKey(),
-  threadId: text("thread_id").notNull().unique(), // From email headers or generated
-  customerEmail: text("customer_email"),
-  customerName: text("customer_name"),
-  subject: text("subject"), // Normalized subject
-  status: text("status", {
-    enum: ["action_needed", "quote_request", "po_received", "no_action", "not_customer"],
-  }).notNull().default("action_needed"),
-  statusReason: text("status_reason"), // AI's explanation
-  emailCount: integer("email_count").notNull().default(0),
-  lastActivity: timestamp("last_activity"),
-  createdAt: timestamp("created_at").notNull(),
-  classifiedAt: timestamp("classified_at"),
+  reportDate: date("report_date").notNull(),
+  reportType: reportTypeEnum("report_type").notNull(),
+  emailsReceived: integer("emails_received").notNull().default(0),
+  emailsSent: integer("emails_sent").notNull().default(0),
+  generatedAt: timestamp("generated_at").notNull(),
+  sentAt: timestamp("sent_at"),
+  reportHtml: text("report_html"),
 });
 
-export const threadEmails = pgTable("email_thread_messages", {
+// Report threads - categorized thread summaries for each report
+export const reportThreads = pgTable("email_report_threads", {
   id: serial("id").primaryKey(),
-  threadId: integer("thread_id")
+  reportId: integer("report_id")
     .notNull()
-    .references(() => threads.id, { onDelete: "cascade" }),
-  emailId: integer("email_id")
+    .references(() => dailyReports.id, { onDelete: "cascade" }),
+  threadKey: text("thread_key").notNull(), // Normalized subject/messageId
+  category: categoryEnum("category").notNull(),
+  itemType: itemTypeEnum("item_type").notNull(),
+  contactEmail: text("contact_email"),
+  contactName: text("contact_name"),
+  subject: text("subject"),
+  summary: text("summary"), // AI generated
+  emailCount: integer("email_count").notNull().default(0),
+  lastEmailDate: timestamp("last_email_date"),
+  lastEmailFromUs: boolean("last_email_from_us").default(false),
+  poDetails: jsonb("po_details"), // Extracted PO info: { items, total, vendor, poNumber }
+});
+
+// Todo items - action items identified in reports
+export const todoItems = pgTable("email_todo_items", {
+  id: serial("id").primaryKey(),
+  reportId: integer("report_id")
     .notNull()
-    .references(() => emails.id, { onDelete: "cascade" }),
+    .references(() => dailyReports.id, { onDelete: "cascade" }),
+  threadKey: text("thread_key").notNull(),
+  todoType: todoTypeEnum("todo_type").notNull(),
+  description: text("description"),
+  contactEmail: text("contact_email"),
+  contactName: text("contact_name"),
+  originalDate: timestamp("original_date"),
+  subject: text("subject"),
+  resolved: boolean("resolved").notNull().default(false),
+  resolvedAt: timestamp("resolved_at"),
 });
 
 // Type exports
 export type Email = typeof emails.$inferSelect;
 export type NewEmail = typeof emails.$inferInsert;
-export type Thread = typeof threads.$inferSelect;
-export type NewThread = typeof threads.$inferInsert;
-export type ThreadEmail = typeof threadEmails.$inferSelect;
-export type NewThreadEmail = typeof threadEmails.$inferInsert;
-export type ThreadStatus = "action_needed" | "quote_request" | "po_received" | "no_action" | "not_customer";
+export type DailyReport = typeof dailyReports.$inferSelect;
+export type NewDailyReport = typeof dailyReports.$inferInsert;
+export type ReportThread = typeof reportThreads.$inferSelect;
+export type NewReportThread = typeof reportThreads.$inferInsert;
+export type TodoItem = typeof todoItems.$inferSelect;
+export type NewTodoItem = typeof todoItems.$inferInsert;
+
+export type ReportType = "daily_summary" | "morning_reminder";
+export type Category = "customer" | "vendor" | "other";
+export type ItemType = "po_sent" | "po_received" | "quote_request" | "general" | "other";
+export type TodoType = "po_unacknowledged" | "quote_unanswered" | "general_unanswered";

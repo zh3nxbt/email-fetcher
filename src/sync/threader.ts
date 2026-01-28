@@ -103,8 +103,43 @@ export function groupEmailsIntoThreads(emails: Email[]): Map<string, Email[]> {
     mergedThreads.get(finalTarget)!.push(...threadEmails);
   }
 
+  // Third pass: merge threads with same normalized subject
+  // This catches replies that have broken In-Reply-To headers
+  const subjectToThread = new Map<string, string>();
+  const finalMergedThreads = new Map<string, Email[]>();
+  const subjectMergeMap = new Map<string, string>();
+
+  for (const [threadId, threadEmails] of mergedThreads) {
+    // Get the normalized subject from the first email
+    const firstEmail = threadEmails[0];
+    const normSubject = normalizeSubject(firstEmail?.subject);
+
+    if (normSubject && normSubject.length > 5) { // Only merge if subject is meaningful
+      if (subjectToThread.has(normSubject)) {
+        // Merge into existing thread with same subject
+        const existingThreadId = subjectToThread.get(normSubject)!;
+        subjectMergeMap.set(threadId, existingThreadId);
+      } else {
+        subjectToThread.set(normSubject, threadId);
+      }
+    }
+  }
+
+  // Apply subject-based merges
+  for (const [threadId, threadEmails] of mergedThreads) {
+    let finalTarget = threadId;
+    while (subjectMergeMap.has(finalTarget)) {
+      finalTarget = subjectMergeMap.get(finalTarget)!;
+    }
+
+    if (!finalMergedThreads.has(finalTarget)) {
+      finalMergedThreads.set(finalTarget, []);
+    }
+    finalMergedThreads.get(finalTarget)!.push(...threadEmails);
+  }
+
   // Sort emails within each thread by date
-  for (const [, threadEmails] of mergedThreads) {
+  for (const [, threadEmails] of finalMergedThreads) {
     threadEmails.sort((a, b) => {
       const dateA = a.date?.getTime() || 0;
       const dateB = b.date?.getTime() || 0;
@@ -112,7 +147,7 @@ export function groupEmailsIntoThreads(emails: Email[]): Map<string, Email[]> {
     });
   }
 
-  return mergedThreads;
+  return finalMergedThreads;
 }
 
 // Identify the customer for a thread

@@ -7,8 +7,9 @@ import { db, schema } from "@/db";
 import { eq, and, inArray } from "drizzle-orm";
 import type { NewEmail } from "@/db/schema";
 
-const MAILBOXES = ["INBOX", "Sent", "Sent Items"];
-const SYNC_DAYS = 27; // From Jan 1
+const MAILBOXES = ["INBOX", "Sent", "Sent Messages"];
+// Jan 26, 2026 00:00 EST = Jan 26, 2026 05:00 UTC
+const SYNC_SINCE = new Date("2026-01-26T05:00:00.000Z");
 
 export interface SyncStats {
   emailsSynced: number;
@@ -46,9 +47,8 @@ async function syncMailbox(
 
     console.log(`Syncing mailbox: ${mailbox} (${mailboxInfo.exists} messages)`);
 
-    // Calculate date range (last N days)
-    const sinceDate = new Date();
-    sinceDate.setDate(sinceDate.getDate() - SYNC_DAYS);
+    // Search for messages since cutoff date
+    const sinceDate = SYNC_SINCE;
 
     // Search for messages in date range
     const searchResult = await client.search({ since: sinceDate }, { uid: true });
@@ -75,16 +75,16 @@ async function syncMailbox(
       try {
         const msg = await client.fetchOne(uid, { source: true, bodyStructure: true }, { uid: true });
 
-        if (!msg.source) {
+        if (!msg || !(msg as any).source) {
           console.log(`  UID ${uid}: no source, skipping`);
           continue;
         }
 
         // Parse with mailparser
-        const parsed = await simpleParser(msg.source);
+        const parsed = await simpleParser((msg as any).source);
 
         // Extract attachments from bodyStructure
-        const attachments = extractAttachments(msg.bodyStructure);
+        const attachments = extractAttachments((msg as any).bodyStructure);
 
         // Get body text (prefer plain text, fall back to html-to-text conversion would happen in parsed.text)
         const bodyText = parsed.text || "";
@@ -96,7 +96,7 @@ async function syncMailbox(
           fromAddress: parsed.from?.value?.[0]?.address || null,
           fromName: parsed.from?.value?.[0]?.name || null,
           toAddresses: JSON.stringify(
-            parsed.to?.value?.map((a) => a.address).filter(Boolean) || []
+            (Array.isArray(parsed.to) ? parsed.to : parsed.to?.value)?.map((a: any) => a.address).filter(Boolean) || []
           ),
           subject: parsed.subject || null,
           bodyText: bodyText.slice(0, 50000),

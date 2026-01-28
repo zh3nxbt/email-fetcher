@@ -8,10 +8,6 @@ out
 
 # Database
 data/
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
 
 # Drizzle
 drizzle/
@@ -19,3 +15,9 @@ drizzle/
 # IDE
 .idea
 .vscode
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Windows artifacts
+nul

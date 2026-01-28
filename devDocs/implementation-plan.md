@@ -1,21 +1,13 @@
-# Email Job Flow Tracker - Implementation Plan
+# Email Report System - Implementation Plan
 
 ## Summary
-A **Job Flow Tracker** that:
-- Monitors customer emails via IMAP
-- Uses **Claude Haiku** to analyze entire threads and determine action needed
-- Groups emails into threads by customer
-- Displays on a 3-column Kanban dashboard
 
-## Kanban Board (3 Columns)
-
-| Column | What Goes Here |
-|--------|----------------|
-| **To Do** | Threads requiring our response/action |
-| **Quote Requests** | Customer asking for pricing/quote (pending our quote) |
-| **PO Received / Jobs** | Purchase orders, confirmed jobs |
-
-**Not shown:** Threads with no action needed (resolved, "thank you" emails, spam, etc.)
+A **Daily Report Generation System** for MAS Precision Parts that:
+- Monitors customer and vendor emails via IMAP
+- Uses **Claude Haiku** to categorize threads and extract PO details
+- Generates two scheduled email reports:
+  - **4pm EST**: Full daily summary (metrics, categorized threads, PO details, action items)
+  - **7am EST**: Morning reminder (pending todos + overnight email summary)
 
 ---
 
@@ -24,13 +16,13 @@ A **Job Flow Tracker** that:
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   IMAP Server   │────▶│  Sync Service    │────▶│    Database     │
-│  (Bluehost)     │     │                  │     │   (Supabase)    │
+│   (Bluehost)    │     │                  │     │   (Supabase)    │
 └─────────────────┘     └────────┬─────────┘     └────────┬────────┘
                                  │                        │
                                  ▼                        ▼
                         ┌─────────────────┐     ┌─────────────────┐
-                        │  Claude Haiku   │     │   Next.js App   │
-                        │  (Thread AI)    │     │  (Dashboard UI) │
+                        │  Claude Haiku   │     │  Report Email   │
+                        │  (Categorizer)  │     │  (SMTP Output)  │
                         └─────────────────┘     └─────────────────┘
 ```
 
@@ -40,28 +32,23 @@ A **Job Flow Tracker** that:
 
 | Component | Choice |
 |-----------|--------|
-| Framework | Next.js 15 |
-| Database | **Supabase PostgreSQL** + Drizzle ORM |
-| DB Driver | `postgres` (via pooler connection) |
+| Runtime | Node.js + TypeScript |
+| Framework | Next.js 15 (App Router) |
+| Database | Supabase PostgreSQL + Drizzle ORM |
 | IMAP | imapflow + mailparser |
-| Classification | Claude Haiku API (@anthropic-ai/sdk) |
-| UI | Tailwind + shadcn/ui |
+| AI Classification | Claude Haiku (@anthropic-ai/sdk) - batch mode |
+| PDF Parsing | pdf-parse |
+| Email Sending | Nodemailer (SMTP) |
+| Timezone | date-fns-tz |
+| UI Components | shadcn/ui + Tailwind CSS |
 
 ---
 
-## Database (Supabase)
+## Database Schema
 
-### Connection
-Uses Supabase's **Transaction Pooler** for serverless compatibility:
-```
-postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
-```
+All tables prefixed with `email_`:
 
-Set in `.env` as `DATABASE_URL`.
-
-### Tables (all prefixed with `email_`)
-
-**`email_messages`** - Raw email records
+### `email_messages` - Raw email records
 - `id`, `uid`, `message_id`
 - `from_address`, `from_name`, `to_addresses`
 - `subject`, `body_text`, `date`
@@ -69,193 +56,321 @@ Set in `.env` as `DATABASE_URL`.
 - `has_attachments`, `attachments`
 - `synced_at`
 
-**`email_threads`** - Email thread summaries (AI-classified)
-- `id`, `thread_id` (from email headers)
-- `customer_email`, `customer_name`
-- `subject` (normalized)
-- `status` (action_needed, quote_request, po_received, no_action, not_customer)
-- `status_reason` (AI's explanation)
-- `email_count`
-- `last_activity`, `created_at`, `classified_at`
+### `email_daily_reports` - Generated reports
+- `id`, `report_date`, `report_type` (daily_summary | morning_reminder)
+- `emails_received`, `emails_sent`
+- `generated_at`, `sent_at`
+- `report_html`
 
-**`email_thread_messages`** - Link table
-- `thread_id`, `email_id`
+### `email_report_threads` - Categorized thread summaries per report
+- `id`, `report_id` (FK)
+- `thread_key` (normalized subject/messageId)
+- `category` (customer | vendor | other)
+- `item_type` (po_sent | po_received | quote_request | general | other)
+- `contact_email`, `contact_name`
+- `subject`, `summary` (AI generated)
+- `email_count`, `last_email_date`, `last_email_from_us`
+- `po_details` (JSONB - extracted PO info)
 
-### Migrations
-```bash
-npm run db:push      # Push schema to Supabase
-npm run db:studio    # Open Drizzle Studio
-```
-
----
-
-## Configuration
-
-- **Our email**: `sales@masprecisionparts.com`
-- **API Key**: `ANTHROPIC_API_KEY` in `.env`
-- **Database**: `DATABASE_URL` in `.env` (Supabase pooler URL)
-- **Initial sync**: Last 30 days
-- **Mailboxes**: `INBOX`, `Sent`, `Sent Items` (multiple users use different clients)
+### `email_todo_items` - Action items
+- `id`, `report_id` (FK), `thread_key`
+- `todo_type` (po_unacknowledged | quote_unanswered | general_unanswered)
+- `description`, `contact_email`, `contact_name`
+- `original_date`, `subject`
+- `resolved`, `resolved_at`
 
 ---
 
-## Thread Classification with Claude Haiku
+## Report Time Windows
 
-**Key insight:** Classify the **entire thread**, not individual emails. The LLM reads the conversation and determines the current state.
+### 4pm Daily Summary
+- **Window**: 7am EST same day → 4pm EST same day
+- **Considers**: 7am morning report todos + emails from 7am-4pm
+- **Shows**:
+  - Resolved todos (struck out) from morning report
+  - New todos from daytime emails
+  - Categorized threads (Customer, Vendor, Other)
+  - PO details extracted from PDFs
 
-### Critical: Customer vs Vendor Distinction
-
-MAS Precision Parts is OUR company. We must distinguish:
-
-| Scenario | Classification |
-|----------|----------------|
-| Customer sends US a PO | `po_received` ✓ |
-| WE send a PO to vendor | `no_action` (we're buying) |
-| Customer asks US for quote | `quote_request` ✓ |
-| WE ask vendor for quote | `no_action` (we're buying) |
-
-**Rule:** If the FIRST email in a thread is [SENT] by us, we initiated the conversation = likely vendor/supplier interaction, NOT a customer.
-
-**Prompt for each thread:**
-```
-You are analyzing an email thread for a precision parts manufacturing company.
-Read the conversation and determine what action (if any) is needed from us.
-
-Thread (oldest first):
-{thread_emails_formatted}
-
-Based on the conversation, classify this thread:
-
-1. "action_needed" - We need to respond. Customer asked a question, made a request,
-   or is waiting for information from us. Excludes simple "thank you" messages
-   or cases where we said "we'll get back to you" and haven't yet.
-
-2. "quote_request" - Customer is specifically asking for pricing, a quote, estimate,
-   or RFQ. We need to prepare and send a quote.
-
-3. "po_received" - Customer has sent a purchase order, confirmed an order, or
-   indicated they want to proceed with buying.
-
-4. "no_action" - No response needed. Thread is resolved, customer said "thank you",
-   we're waiting on THEM to respond, or this is spam/newsletter/automated.
-
-5. "not_customer" - This is not a customer email (newsletter, spam, internal, automated).
-
-Respond with JSON only:
-{
-  "status": "action_needed" | "quote_request" | "po_received" | "no_action" | "not_customer",
-  "reason": "brief explanation",
-  "customer_name": "extracted customer name or company if identifiable"
-}
-```
-
-**Examples of nuanced cases:**
-- Customer: "Thank you!" → `no_action` (no reply needed)
-- Us: "We'll check and get back to you tomorrow" → `action_needed` (we owe them a response)
-- Customer: "Got it, thanks. I'll review and let you know." → `no_action` (ball is in their court)
-- Customer: "Can you send me a quote for 100 units?" → `quote_request`
-
-**Cost estimate:** ~$0.002-0.005 per thread (more tokens than single email, still cheap)
+### 7am Morning Reminder
+- **Window**: 4pm EST previous day → 7am EST current day
+- **Considers**: Previous day's 4pm report todos + overnight emails
+- **Shows**:
+  - Pending todos (struck out if resolved overnight)
+  - Overnight email summary
 
 ---
 
-## Thread State Logic
-
-```
-For each thread:
-  1. Fetch all emails in thread (both INBOX and Sent)
-  2. Format as conversation (oldest first)
-  3. Send to Claude Haiku for classification
-  4. Store result:
-     - action_needed → "To Do" column
-     - quote_request → "Quote Requests" column
-     - po_received → "PO/Jobs" column
-     - no_action → Hidden (not displayed)
-     - not_customer → Hidden (filtered out)
-```
-
----
-
-## Files Structure
+## File Structure
 
 ```
 src/
   db/
-    schema.ts         # Drizzle schema (PostgreSQL)
-    index.ts          # DB connection (Supabase)
+    schema.ts          # Drizzle schema (PostgreSQL)
+    index.ts           # Database connection
+    reset.ts           # Clear all data
+  imap/
+    client.ts          # IMAP connection helpers
+    parsers.ts         # MIME parsing utilities
   sync/
-    syncer.ts         # IMAP sync service
-    classifier.ts     # Claude Haiku thread classification
-    threader.ts       # Thread grouping logic
-    thread-processor.ts # Orchestrates sync + classification
-    run-sync.ts       # CLI entry point
-  lib/
-    utils.ts          # cn() helper
-  app/
-    globals.css       # Tailwind styles
-    layout.tsx        # Root layout
-    page.tsx          # Dashboard
-    api/
-      threads/route.ts    # GET threads list
-      threads/[id]/route.ts # GET/PATCH single thread
-      sync/route.ts       # Trigger sync
-  components/
-    JobBoard.tsx    # 3-column Kanban
-    JobCard.tsx     # Thread card
-    JobColumn.tsx   # Single column
-    EmailThread.tsx # Thread detail view
-    ui/             # shadcn components
+    syncer.ts          # Email sync from IMAP
+    threader.ts        # Thread grouping logic
+    run-sync.ts        # CLI entry point
+  report/
+    types.ts           # TypeScript interfaces
+    categorizer.ts     # Thread categorization (customer/vendor/other)
+    summarizer.ts      # AI prompts for categorization & summaries
+    pdf-extractor.ts   # PDF attachment parsing for PO details
+    todo-analyzer.ts   # Identify action items
+    templates.ts       # HTML email templates
+    email-sender.ts    # Nodemailer SMTP
+    generator.ts       # Report orchestration
+    run-report.ts      # CLI entry point
 ```
 
 ---
 
-## Re-classification
+## Commands
 
-Threads are re-classified when:
-1. New email arrives in the thread
-2. User manually triggers re-classification
-3. Periodic refresh (optional)
-
-This ensures status stays current as conversations evolve.
+```bash
+npm run sync             # Fetch emails from IMAP
+npm run report           # Generate 4pm daily summary
+npm run report:morning   # Generate 7am morning reminder
+npm run report -- --preview    # Preview without sending
+npm run report -- --date=2024-01-15  # Historical report
+npm run db:reset         # Clear all data
+npm run db:push          # Push schema to database
+```
 
 ---
 
-## Email Fetching Best Practices
+## Environment Variables
 
-### Use mailparser for MIME decoding
-ImapFlow's `fetchOne({ source: true })` returns raw email bytes. Use `mailparser.simpleParser()` to decode:
-- Base64 encoded content
-- Quoted-printable encoding
-- Charset conversion (UTF-8, ISO-8859-1, etc.)
+```env
+# IMAP
+IMAP_HOST=mail.example.com
+IMAP_PORT=993
+IMAP_USER=sales@masprecisionparts.com
+IMAP_PASS=...
 
-### Avoid IMAP command conflicts
-**DON'T** nest `fetchOne()` inside `fetch()` iterator - causes hangs:
+# Database
+DATABASE_URL=postgresql://...
+
+# AI
+ANTHROPIC_API_KEY=...
+
+# Reports
+REPORT_TIMEZONE=America/New_York
+REPORT_RECIPIENT=manager@masprecisionparts.com
+
+# SMTP
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=...
+SMTP_PASS=...
+SMTP_FROM="MAS Reports <reports@example.com>"
+```
+
+---
+
+## Scheduling
+
+Use Windows Task Scheduler or cron:
+- `npm run report` at 4pm EST daily
+- `npm run report:morning` at 7am EST daily
+
+---
+
+## Report Flow
+
+### 4pm Daily Summary Generation
+1. Get todos from same-day 7am morning report
+2. Check which todos are resolved by 7am-4pm email activity
+3. Fetch and categorize emails from 7am-4pm window
+4. Extract PO details from vendor thread PDFs
+5. Identify new todos from daytime threads
+6. Generate HTML with: resolved todos + new todos + thread summaries
+7. Save to database and send via email
+
+### 7am Morning Reminder Generation
+1. Get todos from previous day's 4pm report
+2. Check which todos are resolved by overnight (4pm-7am) email activity
+3. Categorize overnight emails
+4. Generate HTML with: pending todos (resolved struck out) + overnight summary
+5. Save to database and send via email
+
+---
+
+## Key Business Rules
+
+See `devDocs/classification-logic.md` for detailed classification rules including:
+- Customer vs Vendor determination
+- Item type detection (PO, Quote Request, General)
+- Todo identification logic
+- Priority assignment
+
+---
+
+## Technical Implementation Notes
+
+### Batch AI Categorization
+
+Thread categorization uses batch API calls for efficiency:
+- **Batch size**: Up to 20 threads per API call
+- **Body truncation**: 500 chars in batch mode (vs 1500 for single thread)
+- **Fallback**: If batch fails, falls back to individual calls
+- **Efficiency**: 15 threads = 1 API call instead of 15
+
+```
+categorizeThreads() → categorizeThreadsWithBatch() → categorizeThreadsBatch()
+                                                   ↘ (fallback) categorizeThreadWithAI()
+```
+
+**AI returns additional fields:**
+- `needsResponse`: false for "thanks", "sounds good" messages (prevents false positive todos)
+- `relatedTo`: threadKey if this thread is a response to another thread (enables cross-thread merging)
+
+### Thread Grouping (3-Pass Algorithm)
+
+Located in `src/sync/threader.ts`:
+
+1. **Pass 1 - Message-ID/References**: Standard email threading via References header
+2. **Pass 2 - In-Reply-To**: Fallback for emails with In-Reply-To but broken References
+3. **Pass 3 - Subject-based**: Merges threads with same normalized subject (handles "RE: PO 1049" + "PO 1049")
+
+Additionally, in `src/report/categorizer.ts`:
+- **AI relatedTo merging**: Merges threads that are semantically related but have different subjects
+- Example: "RFQ Plates" (our request) + "Estimate 28522 from Valk's Machinery" (vendor response via QuickBooks)
+
+### Web UI Dashboard
+
+Located at `src/app/page.tsx`:
+
+**Features:**
+- Date navigation (prev/next buttons + dropdown)
+- Report type toggle (7am Morning / 4pm Summary)
+- Inline HTML report display
+- "Generate Report" button
+
+**Generate Report Button:**
+- Calls `POST /api/generate-report`
+- Syncs emails first
+- Determines report type based on current EST time:
+  - 7am-4pm → `daily_summary` (4pm report)
+  - 4pm-7am → `morning_reminder` (7am report)
+- Replaces existing report for same date/type
+
+### IMAP Server Configuration
+
+MAS Precision Parts uses Dovecot IMAP with these mailboxes:
+- `INBOX` - incoming emails
+- `INBOX.Sent` (alias: "Sent") - primary sent folder
+- `INBOX.Sent Messages` (alias: "Sent Messages") - secondary sent folder
+
+**Important**: Both sent folders must be synced to capture all outbound emails.
+
+### Timezone Handling
+
+- **Database**: Stores UTC timestamps
+- **Display**: Always convert to EST using `timeZone: "America/New_York"`
+- **Report windows**: Calculated in EST, converted to UTC for queries
+- **CLI dates**: Use `--date=YYYY-MM-DDTHH:MM:SS` format to avoid timezone shift
+
+### IMAP SINCE Search
+
+IMAP `SINCE` is date-only (ignores time). For precise datetime filtering:
+1. Use SINCE to get approximate range from server
+2. Post-filter in database with exact datetime cutoff
+
+---
+
+## Edge Cases & Gotchas
+
+### Customer vs Vendor Classification
+
+**Problem:** Simple "first email = direction" rule fails for invoices/quotations.
+
+**Solution:** Check subject content before defaulting to direction-based classification:
 ```typescript
-// BAD - hangs!
-for await (const msg of client.fetch(uids)) {
-  await client.fetchOne(msg.uid, {...});
+// In categorizer.ts - determineInitialCategory()
+if (isOutbound(firstEmail)) {
+  // Invoice/quotation/quote/estimate sent BY US = Customer (we're billing them)
+  if (subject.includes("invoice") || subject.includes("quotation") || ...) {
+    return "customer";
+  }
+  // PO/RFQ sent BY US = Vendor (we're buying)
+  return "vendor";
 }
 ```
 
-**DO** collect UIDs first, then fetch individually:
+### Acknowledgment Detection
+
+**Problem:** "Great thanks!" emails with signature images appeared to have attachments, triggering false "needs response" flags.
+
+**Solution:** Distinguish real attachments from signature images:
 ```typescript
-// GOOD
-for (const uid of uidsToSync) {
-  const msg = await client.fetchOne(uid, { source: true });
+function hasRealAttachments(email: Email): boolean {
+  // Skip small images (<100KB) - likely signature images
+  // Look for PDFs, documents, large files
 }
 ```
 
----
+**Problem:** "Thank you and kind regards" was matching acknowledgment patterns.
 
-## Verification Plan
+**Solution:** Use strict patterns that match ONLY the acknowledgment phrase:
+```typescript
+const strictAckPatterns = [
+  /^(great )?thanks?!?\.?$/,  // Must match entire string
+  /^thank you!?\.?$/,
+  // NOT: /^thank you/ (would match "Thank you, please find attached...")
+];
+```
 
-1. **Sync test**: Emails fetched and stored in database
-2. **Threading test**: Related emails grouped together
-3. **Classification test**:
-   - "Thank you" email → no_action
-   - "We'll get back to you" from us → action_needed
-   - "Can I get a quote?" from customer → quote_request
-   - WE ask vendor for quote → no_action (not quote_request!)
-   - PO from customer → po_received
-   - WE send PO to vendor → no_action (not po_received!)
-4. **UI test**: 3 columns display correctly, no_action threads hidden
+### Todo Resolution
+
+**Problem:** Customer's "Great thanks!" after our reply was un-resolving todos (last email wasn't from us).
+
+**Solution:** Check if we replied ANYWHERE in the thread, not just if last email is from us:
+```typescript
+// In generator.ts - checkResolvedTodos()
+const weRepliedInWindow = threadEmails.some(email => isOutbound(email));
+if (weRepliedInWindow) {
+  resolvedIds.add(todo.id);
+}
+```
+
+### PO Detection
+
+**Problem:** AI sometimes classifies obvious POs as "general".
+
+**Solution:** Post-process AI results with subject pattern matching:
+```typescript
+// In categorizer.ts
+if (category === "customer" && itemType === "general") {
+  if (subject.includes("po number") || /\bpo\d{5,}/i.test(subject)) {
+    itemType = "po_received";
+  }
+}
+```
+
+### SMTP Self-Signed Certificates
+
+**Problem:** `Error: self signed certificate` when sending emails.
+
+**Solution:** Add TLS config to nodemailer:
+```typescript
+tls: { rejectUnauthorized: false }
+```
+
+### Email Template Styling
+
+**Problem:** CSS classes stripped by email clients, colors not showing.
+
+**Solution:** Always use inline styles for colors:
+```html
+<!-- Wrong -->
+<span class="label-po">PO Received</span>
+
+<!-- Correct -->
+<span style="color: #059669;">PO Received</span>
+```
