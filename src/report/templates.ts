@@ -348,7 +348,7 @@ export function generateDailySummaryHtml(
 </head>
 <body>
   <div class="container">
-    <h1>${dateStr}</h1>
+    <h1>${dateStr} - Daily Summary</h1>
     <div style="font-size: 13px; color: #666; margin-bottom: 16px;">
       ${received} received, ${sent} sent
     </div>
@@ -396,7 +396,7 @@ export function generateMorningReminderHtml(data: MorningReportData): string {
 </head>
 <body>
   <div class="container">
-    <h1>${dateStr}</h1>
+    <h1>${dateStr} - Morning To Do Reminder</h1>
     <div style="font-size: 13px; color: #666; margin-bottom: 16px;">
       ${data.overnightReceived} received, ${data.overnightSent} sent overnight
     </div>
