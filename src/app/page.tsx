@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { RefreshCw, Loader2, Mail, FileText, Calendar, ChevronLeft, ChevronRight, Sun, Clock } from "lucide-react";
+import { RefreshCw, Loader2, Mail, FileText, Calendar, ChevronLeft, ChevronRight, Sun, Clock, Coffee } from "lucide-react";
 import type { DailyReport } from "@/db/schema";
 
 export default function Dashboard() {
@@ -13,7 +13,7 @@ export default function Dashboard() {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [selectedType, setSelectedType] = useState<"daily_summary" | "morning_reminder">("daily_summary");
+  const [selectedType, setSelectedType] = useState<"daily_summary" | "morning_reminder" | "midday_report">("daily_summary");
   const reportContainerRef = useRef<HTMLDivElement>(null);
 
   // Get unique dates from reports
@@ -299,8 +299,20 @@ export default function Dashboard() {
                   className="flex-1"
                 >
                   <Sun className="h-4 w-4 mr-2" />
-                  7am Morning
+                  7am
                   {!availableTypes.includes("morning_reminder") && (
+                    <span className="ml-2 text-xs opacity-60">(none)</span>
+                  )}
+                </Button>
+                <Button
+                  variant={selectedType === "midday_report" ? "default" : "outline"}
+                  onClick={() => setSelectedType("midday_report")}
+                  disabled={!availableTypes.includes("midday_report")}
+                  className="flex-1"
+                >
+                  <Coffee className="h-4 w-4 mr-2" />
+                  12pm
+                  {!availableTypes.includes("midday_report") && (
                     <span className="ml-2 text-xs opacity-60">(none)</span>
                   )}
                 </Button>
@@ -311,7 +323,7 @@ export default function Dashboard() {
                   className="flex-1"
                 >
                   <Clock className="h-4 w-4 mr-2" />
-                  4pm Summary
+                  4pm
                   {!availableTypes.includes("daily_summary") && (
                     <span className="ml-2 text-xs opacity-60">(none)</span>
                   )}
@@ -325,10 +337,18 @@ export default function Dashboard() {
                 <CardHeader className="pb-2">
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-lg">
-                      {displayedReport.reportType === "daily_summary" ? "Daily Summary" : "Morning Reminder"}
+                      {displayedReport.reportType === "daily_summary"
+                        ? "Daily Summary"
+                        : displayedReport.reportType === "midday_report"
+                        ? "Midday Update"
+                        : "Morning Reminder"}
                     </CardTitle>
                     <Badge variant={displayedReport.reportType === "daily_summary" ? "default" : "secondary"}>
-                      {displayedReport.reportType === "daily_summary" ? "4pm" : "7am"}
+                      {displayedReport.reportType === "daily_summary"
+                        ? "4pm"
+                        : displayedReport.reportType === "midday_report"
+                        ? "12pm"
+                        : "7am"}
                     </Badge>
                   </div>
                   <CardDescription>

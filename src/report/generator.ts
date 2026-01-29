@@ -22,6 +22,7 @@ import { identifyTodos } from "./todo-analyzer";
 import {
   generateDailySummaryHtml,
   generateMorningReminderHtml,
+  generateMiddayReportHtml,
   generatePlainTextSummary,
 } from "./templates";
 import { sendReportEmail } from "./email-sender";
@@ -29,14 +30,14 @@ import { groupEmailsIntoThreads } from "@/sync/threader";
 
 const TIMEZONE = process.env.REPORT_TIMEZONE || "America/New_York";
 
-// Get the 4pm daily summary window (7am to 4pm same day)
+// Get the 4pm daily summary window (12pm to 4pm same day)
 export function getDailySummaryWindow(forDate: Date): TimeWindow {
   // Convert to the target timezone
   const zonedDate = toZonedTime(forDate, TIMEZONE);
 
-  // Start is 7am on the given date
+  // Start is 12pm on the given date (changed from 7am to chain from midday report)
   const startDate = new Date(zonedDate);
-  startDate.setHours(7, 0, 0, 0);
+  startDate.setHours(12, 0, 0, 0);
 
   // End is 4pm on the given date
   const endDate = new Date(zonedDate);
@@ -62,6 +63,26 @@ export function getMorningReminderWindow(forDate: Date): TimeWindow {
   const startDate = new Date(zonedDate);
   startDate.setDate(startDate.getDate() - 1);
   startDate.setHours(16, 0, 0, 0);
+
+  // Convert back to UTC
+  return {
+    start: fromZonedTime(startDate, TIMEZONE),
+    end: fromZonedTime(endDate, TIMEZONE),
+  };
+}
+
+// Get the 12pm midday report window (7am to 12pm same day)
+export function getMiddayReportWindow(forDate: Date): TimeWindow {
+  // Convert to the target timezone
+  const zonedDate = toZonedTime(forDate, TIMEZONE);
+
+  // Start is 7am on the given date
+  const startDate = new Date(zonedDate);
+  startDate.setHours(7, 0, 0, 0);
+
+  // End is 12pm on the given date
+  const endDate = new Date(zonedDate);
+  endDate.setHours(12, 0, 0, 0);
 
   // Convert back to UTC
   return {
@@ -131,7 +152,7 @@ async function getDismissedThreadKeys(): Promise<Set<string>> {
   return new Set(dismissed.map((d) => d.threadKey));
 }
 
-// Get the 7am report from the same day (for 4pm report)
+// Get the 7am report from the same day (for 12pm report)
 async function getSameDayMorningReport(forDate: Date) {
   const dateStr = forDate.toISOString().split("T")[0];
 
@@ -141,6 +162,25 @@ async function getSameDayMorningReport(forDate: Date) {
     .where(
       and(
         eq(schema.dailyReports.reportType, "morning_reminder"),
+        eq(schema.dailyReports.reportDate, dateStr)
+      )
+    )
+    .orderBy(desc(schema.dailyReports.generatedAt))
+    .limit(1);
+
+  return reports[0] || null;
+}
+
+// Get the 12pm report from the same day (for 4pm report)
+async function getSameDayMiddayReport(forDate: Date) {
+  const dateStr = forDate.toISOString().split("T")[0];
+
+  const reports = await db
+    .select()
+    .from(schema.dailyReports)
+    .where(
+      and(
+        eq(schema.dailyReports.reportType, "midday_report"),
         eq(schema.dailyReports.reportDate, dateStr)
       )
     )
@@ -190,21 +230,21 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
   const window = getDailySummaryWindow(reportDate);
 
   console.log(`Generating daily summary for window:`);
-  console.log(`  Start: ${window.start.toISOString()} (7am EST)`);
+  console.log(`  Start: ${window.start.toISOString()} (12pm EST)`);
   console.log(`  End: ${window.end.toISOString()} (4pm EST)`);
 
-  // Step 1: Get pending todos from this morning's 7am report
-  console.log("\nStep 1: Fetching todos from morning report...");
-  const morningReport = await getSameDayMorningReport(reportDate);
-  let morningTodosWithStatus: DisplayTodo[] = [];
+  // Step 1: Get pending todos from this day's 12pm midday report
+  console.log("\nStep 1: Fetching todos from midday report...");
+  const middayReport = await getSameDayMiddayReport(reportDate);
+  let middayTodosWithStatus: DisplayTodo[] = [];
 
-  if (morningReport) {
-    const morningTodos = await getUnresolvedTodos(morningReport.id);
-    console.log(`  Found ${morningTodos.length} unresolved todos from 7am report`);
+  if (middayReport) {
+    const middayTodos = await getUnresolvedTodos(middayReport.id);
+    console.log(`  Found ${middayTodos.length} unresolved todos from 12pm report`);
 
-    // Check which are resolved by 7am-4pm activity
+    // Check which are resolved by 12pm-4pm activity
     const resolvedIds = await checkResolvedTodos(
-      morningTodos.map(t => ({ id: t.id, threadKey: t.threadKey })),
+      middayTodos.map(t => ({ id: t.id, threadKey: t.threadKey })),
       window
     );
 
@@ -213,8 +253,8 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
       await markTodosResolved([...resolvedIds]);
     }
 
-    // Map all morning todos with their resolved status
-    morningTodosWithStatus = morningTodos.map(t => ({
+    // Map all midday todos with their resolved status
+    middayTodosWithStatus = middayTodos.map(t => ({
       threadKey: t.threadKey,
       todoType: t.todoType,
       description: t.description || "",
@@ -225,14 +265,14 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
       resolved: resolvedIds.has(t.id),
     }));
 
-    const stillPending = morningTodosWithStatus.filter(t => !t.resolved).length;
+    const stillPending = middayTodosWithStatus.filter(t => !t.resolved).length;
     console.log(`  ${stillPending} todos still pending, ${resolvedIds.size} resolved`);
   } else {
-    console.log("  No morning report found for today");
+    console.log("  No midday report found for today");
   }
 
-  // Step 2: Categorize threads in the 7am-4pm window
-  console.log("\nStep 2: Categorizing threads (7am-4pm)...");
+  // Step 2: Categorize threads in the 12pm-4pm window
+  console.log("\nStep 2: Categorizing threads (12pm-4pm)...");
   let threads = await categorizeThreads(window);
   console.log(`  Found ${threads.length} threads`);
 
@@ -249,18 +289,18 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
   const dismissedThreadKeys = await getDismissedThreadKeys();
   console.log(`  ${dismissedThreadKeys.size} threads previously dismissed`);
 
-  // Filter out dismissed threads from carried-over morning todos
-  const dismissedFromMorning = morningTodosWithStatus.filter(t => dismissedThreadKeys.has(t.threadKey));
-  if (dismissedFromMorning.length > 0) {
-    console.log(`  Removing ${dismissedFromMorning.length} dismissed todos from morning carry-over`);
-    morningTodosWithStatus = morningTodosWithStatus.filter(t => !dismissedThreadKeys.has(t.threadKey));
+  // Filter out dismissed threads from carried-over midday todos
+  const dismissedFromMidday = middayTodosWithStatus.filter(t => dismissedThreadKeys.has(t.threadKey));
+  if (dismissedFromMidday.length > 0) {
+    console.log(`  Removing ${dismissedFromMidday.length} dismissed todos from midday carry-over`);
+    middayTodosWithStatus = middayTodosWithStatus.filter(t => !dismissedThreadKeys.has(t.threadKey));
   }
 
-  // Filter out new todos that are duplicates of morning todos (by threadKey)
-  const morningThreadKeys = new Set(morningTodosWithStatus.map(t => t.threadKey));
+  // Filter out new todos that are duplicates of midday todos (by threadKey)
+  const middayThreadKeys = new Set(middayTodosWithStatus.map(t => t.threadKey));
 
   const trulyNewTodos = newTodosRaw.filter(t =>
-    !morningThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
+    !middayThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
   );
   console.log(`  ${trulyNewTodos.length} are genuinely new (not carry-over or dismissed)`);
 
@@ -270,12 +310,12 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
     resolved: false,
   }));
 
-  // Combine for display: morning todos (with resolved status) + new todos
-  const displayTodos: DisplayTodo[] = [...morningTodosWithStatus, ...newTodosDisplay];
+  // Combine for display: midday todos (with resolved status) + new todos
+  const displayTodos: DisplayTodo[] = [...middayTodosWithStatus, ...newTodosDisplay];
 
-  // For DB insertion: save BOTH unresolved morning todos AND new todos
-  // This ensures the chain continues: 7am → 4pm → next 7am can find them
-  const unresolvedMorningTodos: IdentifiedTodo[] = morningTodosWithStatus
+  // For DB insertion: save BOTH unresolved midday todos AND new todos
+  // This ensures the chain continues: 7am → 12pm → 4pm → next 7am can find them
+  const unresolvedMiddayTodos: IdentifiedTodo[] = middayTodosWithStatus
     .filter(t => !t.resolved)
     .map(t => ({
       threadKey: t.threadKey,
@@ -286,7 +326,7 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
       originalDate: t.originalDate,
       subject: t.subject,
     }));
-  const todosForDb: IdentifiedTodo[] = [...unresolvedMorningTodos, ...trulyNewTodos];
+  const todosForDb: IdentifiedTodo[] = [...unresolvedMiddayTodos, ...trulyNewTodos];
 
   const unresolvedCount = displayTodos.filter(t => !t.resolved).length;
   const resolvedCount = displayTodos.filter(t => t.resolved).length;
@@ -422,6 +462,137 @@ export async function generateMorningReminder(options: ReportOptions = {}): Prom
 
   // Use window.end for the title date - it's correctly set to 7am EST on the target day
   const html = generateMorningReminderHtml(data, window.end);
+
+  return { reportDate, data, html };
+}
+
+// Midday report data structure
+export interface MiddayReportData {
+  pendingTodos: {
+    id: number;
+    threadKey: string;
+    todoType: "po_unacknowledged" | "quote_unanswered" | "general_unanswered";
+    description: string | null;
+    contactEmail: string | null;
+    contactName: string | null;
+    originalDate: Date | null;
+    subject: string | null;
+    resolved?: boolean;
+  }[];
+  morningEmails: CategorizedThread[];
+  morningReceived: number;
+  morningSent: number;
+}
+
+// Generate the 12pm midday report
+export async function generateMiddayReport(options: ReportOptions = {}): Promise<{
+  reportDate: Date;
+  data: MiddayReportData;
+  html: string;
+}> {
+  const reportDate = options.date || new Date();
+  const window = getMiddayReportWindow(reportDate);
+
+  console.log(`Generating midday report for window:`);
+  console.log(`  Start: ${window.start.toISOString()} (7am EST today)`);
+  console.log(`  End: ${window.end.toISOString()} (12pm EST today)`);
+
+  // Step 1: Get unresolved todos from today's 7am report
+  console.log("\nStep 1: Fetching pending todos from today's 7am report...");
+  const morningReport = await getSameDayMorningReport(reportDate);
+  let pendingTodos: MiddayReportData["pendingTodos"] = [];
+  let resolvedTodoIds: number[] = [];
+
+  if (morningReport) {
+    const morningTodos = await getUnresolvedTodos(morningReport.id);
+    console.log(`  Found ${morningTodos.length} unresolved todos from 7am report`);
+
+    // Check which are resolved by morning activity (7am-12pm)
+    const resolvedIds = await checkResolvedTodos(
+      morningTodos.map(t => ({ id: t.id, threadKey: t.threadKey })),
+      window
+    );
+
+    if (resolvedIds.size > 0) {
+      console.log(`  ${resolvedIds.size} todos resolved by morning email activity`);
+      resolvedTodoIds = [...resolvedIds];
+      await markTodosResolved(resolvedTodoIds);
+    }
+
+    // Map todos with resolved status for display
+    pendingTodos = morningTodos.map((t) => ({
+      id: t.id,
+      threadKey: t.threadKey,
+      todoType: t.todoType,
+      description: t.description,
+      contactEmail: t.contactEmail,
+      contactName: t.contactName,
+      originalDate: t.originalDate,
+      subject: t.subject,
+      resolved: resolvedIds.has(t.id),
+    }));
+
+    console.log(`  ${pendingTodos.filter(t => !t.resolved).length} todos still pending`);
+  } else {
+    console.log("  No 7am report found for today");
+  }
+
+  // Step 2: Categorize morning emails (7am-12pm)
+  console.log("\nStep 2: Categorizing morning emails...");
+  const morningEmails = await categorizeThreads(window);
+  const emails = await fetchEmailsInWindow(window);
+  const { received: morningReceived, sent: morningSent } = countEmailsByDirection(emails);
+  console.log(`  Found ${morningEmails.length} threads (${morningReceived} received, ${morningSent} sent)`);
+
+  // Step 3: Identify NEW action items from morning emails
+  console.log("\nStep 3: Identifying new action items from morning emails...");
+  const morningTodosRaw = identifyTodos(morningEmails);
+
+  // Get manually dismissed threads (persists across report regeneration)
+  const dismissedThreadKeys = await getDismissedThreadKeys();
+  console.log(`  ${dismissedThreadKeys.size} threads previously dismissed`);
+
+  // Filter out dismissed threads from carried-over pending todos
+  const dismissedFromPending = pendingTodos.filter(t => dismissedThreadKeys.has(t.threadKey));
+  if (dismissedFromPending.length > 0) {
+    console.log(`  Removing ${dismissedFromPending.length} dismissed todos from pending list`);
+    pendingTodos = pendingTodos.filter(t => !dismissedThreadKeys.has(t.threadKey));
+  }
+
+  // Filter out duplicates (already in pending todos from morning)
+  const pendingThreadKeys = new Set(pendingTodos.map(t => t.threadKey));
+
+  const newMorningTodos = morningTodosRaw.filter(t =>
+    !pendingThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
+  );
+  console.log(`  Found ${newMorningTodos.length} new action items from morning emails (excluding dismissed)`);
+
+  // Add new morning todos to pending list (for display and saving)
+  for (const todo of newMorningTodos) {
+    pendingTodos.push({
+      id: 0, // Will be assigned when saved
+      threadKey: todo.threadKey,
+      todoType: todo.todoType,
+      description: todo.description,
+      contactEmail: todo.contactEmail,
+      contactName: todo.contactName,
+      originalDate: todo.originalDate,
+      subject: todo.subject,
+      resolved: false,
+    });
+  }
+
+  // Step 4: Generate HTML
+  console.log("\nStep 4: Generating report...");
+  const data: MiddayReportData = {
+    pendingTodos,
+    morningEmails,
+    morningReceived,
+    morningSent,
+  };
+
+  // Use window.end for the title date - it's correctly set to 12pm EST on the target day
+  const html = generateMiddayReportHtml(data, window.end);
 
   return { reportDate, data, html };
 }
@@ -657,4 +828,117 @@ export async function runMorningReminder(options: ReportOptions = {}): Promise<v
   }
 
   console.log("\n=== Morning Reminder Complete ===\n");
+}
+
+// Run midday report (main entry point)
+export async function runMiddayReport(options: ReportOptions = {}): Promise<void> {
+  console.log("\n=== Midday Report (12pm) ===\n");
+
+  const { reportDate, data, html } = await generateMiddayReport(options);
+
+  if (options.preview) {
+    console.log("\n--- Midday Report Preview ---");
+    console.log(`Pending todos: ${data.pendingTodos.filter(t => !t.resolved).length}`);
+    console.log(`Resolved this morning: ${data.pendingTodos.filter(t => t.resolved).length}`);
+    console.log(`Morning threads: ${data.morningEmails.length}`);
+    console.log(`Morning received: ${data.morningReceived}`);
+    console.log(`Morning sent: ${data.morningSent}`);
+
+    if (data.pendingTodos.length > 0) {
+      console.log("\nTodos:");
+      for (const todo of data.pendingTodos) {
+        const status = todo.resolved ? "[x] RESOLVED" : "[ ]";
+        console.log(`  ${status} ${todo.todoType}: ${todo.subject}`);
+        console.log(`      ${todo.contactName || todo.contactEmail || "Unknown"}`);
+      }
+    }
+
+    if (data.morningEmails.length > 0) {
+      console.log("\nMorning Threads:");
+      for (const thread of data.morningEmails.slice(0, 5)) {
+        console.log(`  [${thread.category}] ${thread.subject}`);
+      }
+    }
+    return;
+  }
+
+  // Save the midday report (delete existing first)
+  const dateStr = reportDate.toISOString().split("T")[0];
+
+  // Delete existing midday report for the same date (cascade deletes todos)
+  const existing = await db
+    .select({ id: schema.dailyReports.id })
+    .from(schema.dailyReports)
+    .where(
+      and(
+        eq(schema.dailyReports.reportDate, dateStr),
+        eq(schema.dailyReports.reportType, "midday_report")
+      )
+    );
+
+  if (existing.length > 0) {
+    console.log(`  Replacing existing midday_report for ${dateStr}`);
+    for (const old of existing) {
+      await db.delete(schema.dailyReports).where(eq(schema.dailyReports.id, old.id));
+    }
+  }
+
+  const [inserted] = await db
+    .insert(schema.dailyReports)
+    .values({
+      reportDate: dateStr,
+      reportType: "midday_report",
+      emailsReceived: data.morningReceived,
+      emailsSent: data.morningSent,
+      generatedAt: new Date(),
+      reportHtml: html,
+    })
+    .returning({ id: schema.dailyReports.id });
+
+  // Save morning threads
+  for (const thread of data.morningEmails) {
+    await db.insert(schema.reportThreads).values({
+      reportId: inserted.id,
+      threadKey: thread.threadKey,
+      category: thread.category,
+      itemType: thread.itemType,
+      contactEmail: thread.contactEmail,
+      contactName: thread.contactName,
+      subject: thread.subject,
+      summary: thread.summary,
+      emailCount: thread.emailCount,
+      lastEmailDate: thread.lastEmailDate,
+      lastEmailFromUs: thread.lastEmailFromUs,
+      poDetails: thread.poDetails,
+    });
+  }
+
+  // Save todos that are still pending (for 4pm report to pick up)
+  for (const todo of data.pendingTodos.filter(t => !t.resolved)) {
+    await db.insert(schema.todoItems).values({
+      reportId: inserted.id,
+      threadKey: todo.threadKey,
+      todoType: todo.todoType,
+      description: todo.description,
+      contactEmail: todo.contactEmail,
+      contactName: todo.contactName,
+      originalDate: todo.originalDate,
+      subject: todo.subject,
+    });
+  }
+
+  if (!options.skipEmail) {
+    const dateStr = reportDate.toLocaleDateString("en-US", {
+      weekday: "long",
+      month: "short",
+      day: "numeric",
+    });
+    const subject = `Midday Email Update - ${dateStr}`;
+
+    console.log("\nSending midday report email...");
+    await sendReportEmail(subject, html);
+    await markReportSent(inserted.id);
+  }
+
+  console.log("\n=== Midday Report Complete ===\n");
 }

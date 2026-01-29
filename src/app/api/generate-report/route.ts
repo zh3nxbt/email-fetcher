@@ -6,6 +6,7 @@ import { syncEmails } from "@/sync/syncer";
 import {
   generateDailySummary,
   generateMorningReminder,
+  generateMiddayReport,
   saveReport,
 } from "@/report/generator";
 import type { ReportType } from "@/db/schema";
@@ -18,9 +19,12 @@ function getReportTypeForCurrentTime(): ReportType {
   const zonedNow = toZonedTime(now, TIMEZONE);
   const hour = zonedNow.getHours();
 
-  // 7am-4pm (7-16) = daily_summary (4pm report)
+  // 7am-12pm (7-12) = midday_report (12pm report)
+  // 12pm-4pm (12-16) = daily_summary (4pm report)
   // 4pm-7am (16-7) = morning_reminder (7am report)
-  if (hour >= 7 && hour < 16) {
+  if (hour >= 7 && hour < 12) {
+    return "midday_report";
+  } else if (hour >= 12 && hour < 16) {
     return "daily_summary";
   } else {
     return "morning_reminder";
@@ -81,6 +85,37 @@ export async function POST() {
     if (reportType === "daily_summary") {
       const report = await generateDailySummary();
       reportId = await saveReport(report);
+    } else if (reportType === "midday_report") {
+      // Midday report - save directly
+      const { reportDate, data, html } = await generateMiddayReport();
+
+      const [inserted] = await db
+        .insert(schema.dailyReports)
+        .values({
+          reportDate: reportDate.toISOString().split("T")[0],
+          reportType: "midday_report",
+          emailsReceived: data.morningReceived,
+          emailsSent: data.morningSent,
+          generatedAt: new Date(),
+          reportHtml: html,
+        })
+        .returning({ id: schema.dailyReports.id });
+
+      reportId = inserted.id;
+
+      // Save todos
+      for (const todo of data.pendingTodos.filter(t => !t.resolved)) {
+        await db.insert(schema.todoItems).values({
+          reportId,
+          threadKey: todo.threadKey,
+          todoType: todo.todoType,
+          description: todo.description,
+          contactEmail: todo.contactEmail,
+          contactName: todo.contactName,
+          originalDate: todo.originalDate,
+          subject: todo.subject,
+        });
+      }
     } else {
       // Morning reminder - save directly
       const { reportDate, data, html } = await generateMorningReminder();

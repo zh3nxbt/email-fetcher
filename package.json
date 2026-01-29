@@ -10,6 +10,7 @@
     "sync": "tsx src/sync/run-sync.ts",
     "report": "tsx src/report/run-report.ts",
     "report:morning": "tsx src/report/run-report.ts --morning",
+    "report:midday": "tsx src/report/run-report.ts --midday",
     "db:reset": "tsx src/db/reset.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",

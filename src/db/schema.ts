@@ -1,7 +1,7 @@
 import { pgTable, text, integer, serial, timestamp, boolean, date, jsonb, pgEnum } from "drizzle-orm/pg-core";
 
 // Enums
-export const reportTypeEnum = pgEnum("email_report_type", ["daily_summary", "morning_reminder"]);
+export const reportTypeEnum = pgEnum("email_report_type", ["daily_summary", "morning_reminder", "midday_report"]);
 export const categoryEnum = pgEnum("email_category", ["customer", "vendor", "other"]);
 export const itemTypeEnum = pgEnum("email_item_type", ["po_sent", "po_received", "quote_request", "general", "other"]);
 export const todoTypeEnum = pgEnum("email_todo_type", ["po_unacknowledged", "quote_unanswered", "general_unanswered"]);
@@ -103,7 +103,7 @@ export type NewDismissedThread = typeof dismissedThreads.$inferInsert;
 export type SyncMetadata = typeof syncMetadata.$inferSelect;
 export type NewSyncMetadata = typeof syncMetadata.$inferInsert;
 
-export type ReportType = "daily_summary" | "morning_reminder";
+export type ReportType = "daily_summary" | "morning_reminder" | "midday_report";
 export type Category = "customer" | "vendor" | "other";
 export type ItemType = "po_sent" | "po_received" | "quote_request" | "general" | "other";
 export type TodoType = "po_unacknowledged" | "quote_unanswered" | "general_unanswered";

@@ -1,11 +1,12 @@
 import "dotenv/config";
-import { runDailySummary, runMorningReminder } from "./generator";
+import { runDailySummary, runMorningReminder, runMiddayReport } from "./generator";
 import { syncEmails } from "@/sync/syncer";
 import type { ReportOptions } from "./types";
 
-function parseArgs(): { morning: boolean; options: ReportOptions } {
+function parseArgs(): { morning: boolean; midday: boolean; options: ReportOptions } {
   const args = process.argv.slice(2);
   const morning = args.includes("--morning");
+  const midday = args.includes("--midday");
   const preview = args.includes("--preview");
   const skipEmail = args.includes("--skip-email");
 
@@ -22,6 +23,7 @@ function parseArgs(): { morning: boolean; options: ReportOptions } {
 
   return {
     morning,
+    midday,
     options: { date, preview, skipEmail },
   };
 }
@@ -32,6 +34,7 @@ Usage: npm run report [options]
 
 Options:
   --morning      Generate 7am morning reminder instead of 4pm daily summary
+  --midday       Generate 12pm midday report instead of 4pm daily summary
   --preview      Output to console, don't save or email
   --skip-email   Save to database but don't send email
   --date=YYYY-MM-DD  Generate report for a specific date
@@ -39,7 +42,8 @@ Options:
 Examples:
   npm run report                    # Generate and send 4pm daily summary
   npm run report -- --preview       # Preview daily summary in console
-  npm run report -- --morning       # Generate and send morning reminder
+  npm run report -- --morning       # Generate and send 7am morning reminder
+  npm run report -- --midday        # Generate and send 12pm midday report
   npm run report -- --date=2024-01-15 --preview   # Preview historical report
 `);
 }
@@ -50,7 +54,7 @@ async function main() {
     process.exit(0);
   }
 
-  const { morning, options } = parseArgs();
+  const { morning, midday, options } = parseArgs();
 
   try {
     // Sync emails first (unless previewing historical data)
@@ -62,6 +66,8 @@ async function main() {
 
     if (morning) {
       await runMorningReminder(options);
+    } else if (midday) {
+      await runMiddayReport(options);
     } else {
       await runDailySummary(options);
     }

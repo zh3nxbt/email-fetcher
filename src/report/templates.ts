@@ -1,4 +1,5 @@
 import type { CategorizedThread, MorningReportData, DisplayTodo } from "./types";
+import type { MiddayReportData } from "./generator";
 import { getTodoPriority } from "./todo-analyzer";
 
 // Styles shared across templates
@@ -408,7 +409,7 @@ export function generateDailySummaryHtml(
   <div class="container">
     <h1>${dateStr} - Daily Summary</h1>
     <div style="font-size: 13px; color: #666; margin-bottom: 16px;">
-      ${received} received, ${sent} sent
+      12pm – 4pm · ${received} received, ${sent} sent
     </div>
 
     ${sortedTodos.length > 0 ? `
@@ -426,7 +427,7 @@ export function generateDailySummaryHtml(
     ${ignoredNote}
 
     <div class="footer">
-      ${received} received, ${sent} sent
+      12pm – 4pm · ${received} received, ${sent} sent
     </div>
   </div>
 </body>
@@ -458,7 +459,7 @@ export function generateMorningReminderHtml(data: MorningReportData, reportDate:
   <div class="container">
     <h1>${dateStr} - Morning To Do Reminder</h1>
     <div style="font-size: 13px; color: #666; margin-bottom: 16px;">
-      ${data.overnightReceived} received, ${data.overnightSent} sent overnight
+      4pm – 7am · ${data.overnightReceived} received, ${data.overnightSent} sent overnight
     </div>
 
     ${unresolvedTodos.length > 0 ? `
@@ -467,6 +468,7 @@ export function generateMorningReminderHtml(data: MorningReportData, reportDate:
       ${data.pendingTodos.map((todo) => {
         const label = getTodoLabel(todo.todoType);
         const labelColor = label.class === "urgent" ? "#dc2626" : "#d97706";
+        const timestamp = formatTimestamp(todo.originalDate);
         return `
         <div class="todo-item ${todo.resolved ? "todo-resolved" : ""}" data-thread-key="${escapeHtml(todo.threadKey)}">
           <div class="todo-label" style="${todo.resolved ? "" : `color: ${labelColor};`}">${label.text}</div>
@@ -481,7 +483,7 @@ export function generateMorningReminderHtml(data: MorningReportData, reportDate:
                 : `<button class="todo-complete-btn" data-thread-key="${escapeHtml(todo.threadKey)}">Mark Complete</button>`
               }
             </div>
-            <div class="todo-from">${escapeHtml(todo.contactName || todo.contactEmail || "Unknown")}</div>
+            <div class="todo-from">${escapeHtml(todo.contactName || todo.contactEmail || "Unknown")}${timestamp ? ` · ${timestamp}` : ""}</div>
             ${todo.description ? `<div class="todo-summary">${escapeHtml(todo.description)}</div>` : ""}
           </div>
         </div>
@@ -533,7 +535,115 @@ export function generateMorningReminderHtml(data: MorningReportData, reportDate:
     })()}
 
     <div class="footer">
-      ${data.overnightReceived} received, ${data.overnightSent} sent overnight
+      4pm – 7am · ${data.overnightReceived} received, ${data.overnightSent} sent
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+// Generate midday report HTML
+export function generateMiddayReportHtml(data: MiddayReportData, reportDate: Date): string {
+  const dateStr = reportDate.toLocaleDateString("en-US", {
+    timeZone: "America/New_York",
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
+  const unresolvedTodos = data.pendingTodos.filter(t => !t.resolved);
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Midday Report - ${dateStr}</title>
+  <style>${styles}</style>
+</head>
+<body>
+  <div class="container">
+    <h1>${dateStr} - Midday Update</h1>
+    <div style="font-size: 13px; color: #666; margin-bottom: 16px;">
+      7am – 12pm · ${data.morningReceived} received, ${data.morningSent} sent
+    </div>
+
+    ${unresolvedTodos.length > 0 ? `
+    <div class="section-action-items">
+      <h2>Action Items</h2>
+      ${data.pendingTodos.map((todo) => {
+        const label = getTodoLabel(todo.todoType);
+        const labelColor = label.class === "urgent" ? "#dc2626" : "#d97706";
+        const timestamp = formatTimestamp(todo.originalDate);
+        return `
+        <div class="todo-item ${todo.resolved ? "todo-resolved" : ""}" data-thread-key="${escapeHtml(todo.threadKey)}">
+          <div class="todo-label" style="${todo.resolved ? "" : `color: ${labelColor};`}">${label.text}</div>
+          <div class="todo-content">
+            <div class="todo-header">
+              <div class="todo-subject">
+                ${escapeHtml(todo.subject || "(no subject)")}
+                ${todo.resolved ? '<span class="resolved-tag">resolved</span>' : ""}
+              </div>
+              ${todo.resolved
+                ? '<button class="todo-complete-btn completed" disabled>Completed</button>'
+                : `<button class="todo-complete-btn" data-thread-key="${escapeHtml(todo.threadKey)}">Mark Complete</button>`
+              }
+            </div>
+            <div class="todo-from">${escapeHtml(todo.contactName || todo.contactEmail || "Unknown")}${timestamp ? ` · ${timestamp}` : ""}</div>
+            ${todo.description ? `<div class="todo-summary">${escapeHtml(todo.description)}</div>` : ""}
+          </div>
+        </div>
+      `}).join("")}
+    </div>
+    ` : `
+    <div class="section">
+      <div class="empty-state">No pending items</div>
+    </div>
+    `}
+
+    ${(() => {
+      // Filter threads: only show NEW threads or threads needing action
+      const shouldShow = (t: CategorizedThread) => t.isNewThread || t.needsResponse;
+
+      const morningCustomers = data.morningEmails.filter(t => t.category === "customer" && shouldShow(t));
+      const morningVendors = data.morningEmails.filter(t => t.category === "vendor" && shouldShow(t));
+      const morningOther = data.morningEmails.filter(t => t.category === "other");
+      const morningHandled = data.morningEmails.filter(t =>
+        (t.category === "customer" || t.category === "vendor") && !shouldShow(t)
+      );
+
+      if (data.morningEmails.length === 0) return "";
+
+      const allIgnored = [...morningOther, ...morningHandled];
+      const ignoredNote = allIgnored.length > 0
+        ? `<div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #9ca3af;">
+            <strong>Ignored:</strong>
+            <ul style="margin: 8px 0 0 0; padding-left: 20px;">
+              ${allIgnored.map(t => `<li>${escapeHtml(t.subject || "(no subject)")}</li>`).join("")}
+            </ul>
+          </div>`
+        : "";
+
+      return `
+      <div class="section">
+        <h2>This Morning</h2>
+        ${morningCustomers.length > 0 ? `
+          <h3 style="font-size: 14px; color: #666; margin: 16px 0 8px 0;">Customers</h3>
+          ${sortThreadsByItemType(morningCustomers).map(renderThread).join("")}
+        ` : ""}
+        ${morningVendors.length > 0 ? `
+          <h3 style="font-size: 14px; color: #666; margin: 16px 0 8px 0;">Vendors</h3>
+          ${sortThreadsByItemType(morningVendors).map(renderThread).join("")}
+        ` : ""}
+        ${ignoredNote}
+      </div>
+      `;
+    })()}
+
+    <div class="footer">
+      7am – 12pm · ${data.morningReceived} received, ${data.morningSent} sent
     </div>
   </div>
 </body>

@@ -4,8 +4,9 @@
 
 Email sync and **daily report generation system** for **MAS Precision Parts** - a precision parts manufacturing company. Syncs emails via IMAP, categorizes into threads, and generates scheduled reports:
 
-- **4pm EST**: Full daily summary (metrics, categorized threads, PO details, action items)
-- **7am EST**: Todo reminder + overnight email summary
+- **7am EST**: Morning reminder (overnight emails + pending todos from yesterday)
+- **12pm EST**: Midday update (morning emails + todo status update)
+- **4pm EST**: Full daily summary (afternoon emails + final todo status)
 
 ## Critical Business Logic
 
@@ -265,6 +266,7 @@ npm run dev              # Start Next.js server
 npm run sync             # Fetch emails from IMAP
 npm run report           # Generate 4pm daily summary
 npm run report:morning   # Generate 7am morning reminder
+npm run report:midday    # Generate 12pm midday report
 npm run report -- --preview  # Preview without sending
 npm run report -- --date=2024-01-15  # Historical report
 npm run db:reset         # Clear all data
@@ -342,8 +344,18 @@ src/
 ## Scheduling
 
 Use Windows Task Scheduler or cron:
-- `npm run report` at 4pm EST daily
 - `npm run report:morning` at 7am EST daily
+- `npm run report:midday` at 12pm EST daily
+- `npm run report` at 4pm EST daily
+
+### Todo Chain Flow
+
+Todos carry over through the day in this sequence:
+```
+4pm → 7am (next day) → 12pm → 4pm → 7am (next day)
+```
+
+Each report checks if todos were resolved by email activity in that window and marks them accordingly.
 
 ## Git / SSH
 
