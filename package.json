@@ -15,7 +15,8 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "typecheck": "tsc --noEmit",
-    "test:connections": "tsx test-connections.ts"
+    "test:connections": "tsx test-connections.ts",
+    "qb:test": "tsx src/quickbooks/test-connection.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

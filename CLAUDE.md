@@ -240,6 +240,25 @@ Post-AI processing uses only **definitional constraints** (not pattern heuristic
 - `po_sent` → must be `vendor` (we sent them PO)
 - `quote_request` from us → must be `vendor` (we're buying)
 
+### PDF Attachment Analysis
+
+PDF attachments are analyzed using **Claude's visual PDF analysis** (not text extraction):
+- PDFs are sent as base64 to Claude, which "sees" the document visually
+- This preserves tables, formatting, and can read scanned/image-based PDFs
+- See `src/report/pdf-extractor.ts` → `analyzePdfWithVision()`
+
+**IMAP base64 decoding:** When fetching PDF attachments from IMAP, the content is often still base64-encoded. The code checks for the PDF magic number (`%PDF`) and decodes if needed:
+```typescript
+const first4 = rawContent.slice(0, 4).toString("ascii");
+if (first4 !== "%PDF") {
+  content = Buffer.from(rawContent.toString("ascii"), "base64");
+}
+```
+
+**TODO:** Add DOCX support - Claude doesn't support DOCX directly. Options:
+1. Convert DOCX to PDF before analysis
+2. Use `mammoth` library to extract content as HTML/text
+
 ### Thread Grouping
 
 Threads are grouped using three passes (`src/sync/threader.ts`):

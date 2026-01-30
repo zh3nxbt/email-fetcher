@@ -388,7 +388,11 @@ Return JSON only: {"category": "...", "item_type": "...", "contact_name": "...",
   }
 }
 
-// Extract PO details from PDF text using AI
+/**
+ * @deprecated Use analyzePdfWithVision() in pdf-extractor.ts instead.
+ * Text extraction loses formatting and can't handle tables/charts properly.
+ * This function is kept for backward compatibility but should not be used.
+ */
 export async function extractPoFromPdfText(pdfText: string): Promise<PoExtractionResult> {
   const prompt = `Extract purchase order details from this document text.
 
