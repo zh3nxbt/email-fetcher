@@ -16,7 +16,10 @@
     "db:studio": "drizzle-kit studio",
     "typecheck": "tsc --noEmit",
     "test:connections": "tsx test-connections.ts",
-    "qb:test": "tsx src/quickbooks/test-connection.ts"
+    "qb:test": "tsx src/quickbooks/test-connection.ts",
+    "qb:refresh-customers": "tsx src/quickbooks/refresh-cache.ts",
+    "qb:sync-analyze": "tsx src/jobs/test-sync-analyzer.ts",
+    "jobs:check": "tsx src/jobs/run-jobs-report.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

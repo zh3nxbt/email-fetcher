@@ -279,6 +279,113 @@ The dashboard has a "Generate Report" button that:
 - Replaces existing report for same date/type
 - API endpoint: `POST /api/generate-report`
 
+## QuickBooks Integration
+
+The system integrates with QuickBooks Desktop via Conductor.is API to verify POs against Sales Orders.
+
+### Sync Analyzer Flow
+
+When a customer sends a PO email (`po_received`), the sync analyzer:
+
+1. **Trusted Domain Check**: Filters out emails from untrusted domains (phishing protection)
+   - Sources: domains we've emailed, manual whitelist, QB customer emails
+2. **PDF Analysis**: Extracts PO# and total from PDF attachments using Claude vision
+3. **Customer Matching**: Fuzzy matches email contact to QB customer
+4. **Sales Order Check**: Looks for matching SO by PO# or amount
+5. **Estimate Fallback**: If no SO, checks for matching estimate
+
+### Alert Types (2-Stage Model)
+
+The system uses a 2-stage alert model with persistence:
+
+**Stage 1 (Immediate - on PO detection):**
+| Alert Type | Trigger | Action |
+|------------|---------|--------|
+| `po_detected` | New PO, no SO yet | Watch for SO creation |
+| `po_detected_with_so` | New PO, SO already exists | None (informational) |
+| `no_qb_customer` | Can't match email to QB customer | Add customer to QB |
+| `suspicious_po_email` | Untrusted domain | Review manually |
+
+**Stage 2 (Escalation - 4 hours after Stage 1):**
+| Alert Type | Trigger | Action |
+|------------|---------|--------|
+| `po_missing_so` | 4+ hours since detection, still no SO | Create SO urgently |
+
+**Invoice/SO Integrity:**
+| Alert Type | Trigger | Action |
+|------------|---------|--------|
+| `so_should_be_closed` | Invoice exists, SO open, Invoice >= SO total | Close SO in QB |
+
+**Alert Lifecycle:**
+```
+PO email arrives → po_detected (Stage 1)
+    ↓ [4 hours, no SO]
+po_missing_so (Stage 2)
+    ↓ [SO created in QB]
+Auto-resolved
+```
+
+**Auto-resolution triggers:**
+- `po_detected` → Resolves when SO appears (before escalation)
+- `po_missing_so` → Resolves when SO appears
+- `no_qb_customer` → Resolves when customer added to QB
+
+**Legacy alert types** (from Phase 4, console-only):
+| Alert | Meaning |
+|-------|---------|
+| `po_has_so` | PO matches existing Sales Order |
+| `po_no_so_has_estimate` | PO received, no SO, but found estimate |
+| `po_no_so_no_estimate` | PO received, nothing in QB |
+
+### Trusted Domain Sources
+
+1. **Sent email recipients**: Domains we've emailed are auto-trusted
+2. **Manual whitelist**: `TRUSTED_DOMAINS=newvendor.com,legitcustomer.ca`
+3. **QB customer emails**: Domains from cached QB customer list
+
+### Customer Cache
+
+QB customer list is cached locally (`data/qb-customers.json`) with 24-hour TTL:
+- Reduces API calls during analysis
+- Powers QB customer domain trust filter
+- Refresh manually: `npm run qb:refresh-customers`
+
+### Customer Matching
+
+Fuzzy matching with confidence levels:
+- **exact**: Email matches QB customer email exactly
+- **high**: Name variations match (e.g., "TNT Tools" vs "T.N.T. TOOLS 2025 INC")
+- **medium**: Fuzzy match ≥70% similarity
+- **low**: Email domain matches company name
+
+### Morning Review
+
+The morning review (`npm run jobs:check --morning`) provides a full summary:
+- Overnight PO detections (since 4pm yesterday)
+- All open escalations ("still no SO")
+- Outstanding `no_qb_customer` alerts
+- Suspicious email warnings
+- SOs that should be closed (fully invoiced but still open)
+
+### Files
+
+```
+src/quickbooks/
+  conductor-client.ts    # Conductor.is API wrapper
+  customer-matcher.ts    # Fuzzy customer matching
+  customer-cache.ts      # 24h cached customer list
+  job-documents.ts       # SO/Invoice/Estimate fetching + matching
+  invoice-so-matcher.ts  # LLM-based line item matching
+  trusted-domains.ts     # Domain trust filter
+  types.ts               # QB entity types
+src/jobs/
+  sync-analyzer.ts       # Main PO→QB comparison logic (legacy)
+  alert-manager.ts       # Alert persistence, escalation, resolution
+  alert-templates.ts     # HTML email templates for alerts
+  run-jobs-report.ts     # CLI entry point for jobs:check
+  test-sync-analyzer.ts  # Test script
+```
+
 ## Commands
 
 ```bash
@@ -291,6 +398,12 @@ npm run report -- --preview  # Preview without sending
 npm run report -- --date=2024-01-15  # Historical report
 npm run db:reset         # Clear all data
 npm run db:push          # Push schema to database
+npm run qb:test          # Test QuickBooks connection
+npm run qb:refresh-customers  # Force refresh QB customer cache
+npm run qb:sync-analyze  # Test sync analyzer with real data
+npm run jobs:check       # Run QB sync alert check (hourly)
+npm run jobs:check -- --preview   # Preview alerts without sending
+npm run jobs:check -- --morning   # Morning review mode
 ```
 
 ## Environment Variables
@@ -311,6 +424,7 @@ ANTHROPIC_API_KEY=...
 # Reports
 REPORT_TIMEZONE=America/New_York
 REPORT_RECIPIENT=manager@masprecisionparts.com
+ALERT_RECIPIENT=reports@masprecisionparts.com  # QB sync alerts (falls back to REPORT_RECIPIENT)
 
 # SMTP
 SMTP_HOST=smtp.example.com
@@ -318,6 +432,13 @@ SMTP_PORT=587
 SMTP_USER=...
 SMTP_PASS=...
 SMTP_FROM="MAS Reports <reports@example.com>"
+
+# QuickBooks (via Conductor.is)
+CONDUCTOR_API_KEY=...
+CONDUCTOR_END_USER_ID=...
+
+# Optional: Manual trusted domains (comma-separated)
+TRUSTED_DOMAINS=newvendor.com,legitcustomer.ca
 ```
 
 ## File Structure
@@ -351,6 +472,20 @@ src/
     email-sender.ts        # Nodemailer SMTP
     generator.ts           # Report orchestration
     run-report.ts          # CLI entry point
+  quickbooks/
+    conductor-client.ts    # Conductor.is REST API wrapper
+    customer-matcher.ts    # Fuzzy email→QB customer matching
+    customer-cache.ts      # 24h TTL cache for QB customer list
+    job-documents.ts       # Fetch SOs/invoices/estimates, find matches
+    trusted-domains.ts     # Domain trust filter (sent emails + whitelist + QB)
+    types.ts               # QB entity types (Customer, SO, Invoice, Estimate)
+    test-connection.ts     # CLI to test QB connection
+    refresh-cache.ts       # CLI to force-refresh customer cache
+  jobs/
+    sync-analyzer.ts       # PO→QB comparison, generates alerts
+    test-sync-analyzer.ts  # CLI to test sync analyzer
+data/
+  qb-customers.json        # Cached QB customer list (auto-generated)
 ```
 
 ## Database Schema
@@ -360,6 +495,7 @@ src/
 - **report_threads**: Categorized thread summaries per report
 - **todo_items**: Action items identified in reports
 - **dismissed_threads**: Manually dismissed threadKeys (persists across report regeneration)
+- **qb_sync_alerts**: QB sync alerts with 2-stage lifecycle (Phase 6)
 
 ## Scheduling
 
@@ -367,6 +503,8 @@ Use Windows Task Scheduler or cron:
 - `npm run report:morning` at 7am EST daily
 - `npm run report:midday` at 12pm EST daily
 - `npm run report` at 4pm EST daily
+- `npm run jobs:check --morning` at 7am or 9am EST daily (QB sync morning review)
+- `npm run jobs:check` hourly 9am-4pm EST (QB sync incremental alerts)
 
 ### Todo Chain Flow
 

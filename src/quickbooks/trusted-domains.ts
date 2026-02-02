@@ -4,6 +4,7 @@
  * Prevents processing emails/PDFs from suspicious domains by:
  * 1. Automatically trusting domains we've emailed (from sent folder)
  * 2. Supporting a manual whitelist via TRUSTED_DOMAINS env var
+ * 3. Trusting domains from QB customer emails (via cached customer list)
  *
  * This protects against:
  * - Analyzing infected PDF attachments from phishing emails
@@ -13,6 +14,8 @@
 import { db } from "../db/index.js";
 import { emails } from "../db/schema.js";
 import { sql } from "drizzle-orm";
+import { getCachedCustomers, getCacheStats } from "./customer-cache.js";
+import { ConductorClient } from "./conductor-client.js";
 
 /**
  * Extract domain from an email address
@@ -90,20 +93,72 @@ function getManualWhitelist(): Set<string> {
 }
 
 /**
+ * Get domains from QuickBooks customer email addresses
+ * Uses the cached customer list (24h TTL)
+ */
+async function getQbCustomerDomains(): Promise<Set<string>> {
+  const domains = new Set<string>();
+
+  try {
+    // Check if cache exists before trying to use it
+    const stats = getCacheStats();
+    if (!stats.exists) {
+      // Cache doesn't exist - try to create it if we have credentials
+      if (process.env.CONDUCTOR_API_KEY && process.env.CONDUCTOR_END_USER_ID) {
+        const client = new ConductorClient();
+        const customers = await getCachedCustomers(client);
+        for (const customer of customers) {
+          if (customer.email) {
+            const domain = extractDomain(customer.email);
+            if (domain) {
+              domains.add(domain);
+            }
+          }
+        }
+      }
+      return domains;
+    }
+
+    // Cache exists - load it (getCachedCustomers will use cache if fresh)
+    const client = new ConductorClient();
+    const customers = await getCachedCustomers(client);
+
+    for (const customer of customers) {
+      if (customer.email) {
+        const domain = extractDomain(customer.email);
+        if (domain) {
+          domains.add(domain);
+        }
+      }
+    }
+  } catch (error) {
+    // QB customer domains are optional - don't fail if unavailable
+    console.warn("Could not load QB customer domains:", error);
+  }
+
+  return domains;
+}
+
+/**
  * Build the complete set of trusted domains
  * Combines:
  * 1. Domains from sent email recipients (automatic trust)
  * 2. Manual whitelist from TRUSTED_DOMAINS env var
+ * 3. Domains from QB customer emails (via cached list)
  */
 export async function getTrustedDomains(): Promise<Set<string>> {
-  const [sentDomains, manualDomains] = await Promise.all([
+  const [sentDomains, manualDomains, qbDomains] = await Promise.all([
     getSentEmailDomains(),
     Promise.resolve(getManualWhitelist()),
+    getQbCustomerDomains(),
   ]);
 
-  // Combine both sets
+  // Combine all sets
   const trusted = new Set<string>(sentDomains);
   for (const domain of manualDomains) {
+    trusted.add(domain);
+  }
+  for (const domain of qbDomains) {
     trusted.add(domain);
   }
 
@@ -136,13 +191,20 @@ export async function getTrustedDomainsStats(): Promise<{
   totalTrusted: number;
   fromSentEmails: number;
   fromManualWhitelist: number;
+  fromQbCustomers: number;
   domains: string[];
 }> {
-  const sentDomains = await getSentEmailDomains();
-  const manualDomains = getManualWhitelist();
+  const [sentDomains, manualDomains, qbDomains] = await Promise.all([
+    getSentEmailDomains(),
+    Promise.resolve(getManualWhitelist()),
+    getQbCustomerDomains(),
+  ]);
 
   const allDomains = new Set<string>(sentDomains);
   for (const domain of manualDomains) {
+    allDomains.add(domain);
+  }
+  for (const domain of qbDomains) {
     allDomains.add(domain);
   }
 
@@ -150,6 +212,7 @@ export async function getTrustedDomainsStats(): Promise<{
     totalTrusted: allDomains.size,
     fromSentEmails: sentDomains.size,
     fromManualWhitelist: manualDomains.size,
+    fromQbCustomers: qbDomains.size,
     domains: Array.from(allDomains).sort(),
   };
 }
