@@ -25,11 +25,67 @@ import type {
 } from "./types.js";
 
 const API_BASE = "https://api.conductor.is/v1";
+const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
+const MAX_RETRIES = 3;
 
 interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: Record<string, unknown>;
   headers?: Record<string, string>;
+}
+
+/**
+ * Fetch with retry logic, timeout, and rate limit handling
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries = MAX_RETRIES
+): Promise<Response> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      // Handle rate limiting (429)
+      if (response.status === 429) {
+        const retryAfter = response.headers.get("Retry-After");
+        const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt + 1) * 1000;
+        console.warn(`Rate limited by Conductor API, waiting ${delay / 1000}s before retry...`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      const isLastAttempt = attempt === maxRetries - 1;
+      const isAbortError = error instanceof Error && error.name === "AbortError";
+
+      if (isLastAttempt) {
+        if (isAbortError) {
+          throw new Error(`Request timed out after ${DEFAULT_TIMEOUT_MS}ms`);
+        }
+        throw error;
+      }
+
+      // Exponential backoff for transient errors
+      const delay = Math.pow(2, attempt) * 1000;
+      console.warn(
+        `API request failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay / 1000}s:`,
+        error instanceof Error ? error.message : error
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
+  throw new Error(`Max retries (${maxRetries}) exceeded`);
 }
 
 export class ConductorClient {
@@ -49,7 +105,7 @@ export class ConductorClient {
     const url = `${API_BASE}${endpoint}`;
     const method = options.method || "GET";
 
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       method,
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -98,7 +154,7 @@ export class ConductorClient {
     const customers: QBCustomerMatch[] = [];
     let cursor: string | undefined = undefined;
     let page = 0;
-    const maxPages = 30;
+    const maxPages = 100; // Allow up to 15,000 records (100 * 150)
 
     do {
       const params: CustomerListParams = { limit: 150, status: "active" };
@@ -122,6 +178,13 @@ export class ConductorClient {
       cursor = response.nextCursor;
       page++;
     } while (cursor && page < maxPages);
+
+    if (cursor && page >= maxPages) {
+      console.warn(
+        `Pagination limit (${maxPages} pages) reached for customer list - data may be incomplete. ` +
+        `Fetched ${customers.length} customers.`
+      );
+    }
 
     return customers;
   }
@@ -149,7 +212,7 @@ export class ConductorClient {
     const estimates: QBEstimate[] = [];
     let cursor: string | undefined = undefined;
     let page = 0;
-    const maxPages = 10;
+    const maxPages = 50; // Allow up to 7,500 records per customer
 
     do {
       const params: EstimateListParams = {
@@ -167,6 +230,12 @@ export class ConductorClient {
       cursor = response.nextCursor;
       page++;
     } while (cursor && page < maxPages);
+
+    if (cursor && page >= maxPages) {
+      console.warn(
+        `Pagination limit hit for estimates (customer ${customerId}) - data may be incomplete`
+      );
+    }
 
     return estimates;
   }
@@ -194,7 +263,7 @@ export class ConductorClient {
     const salesOrders: QBSalesOrder[] = [];
     let cursor: string | undefined = undefined;
     let page = 0;
-    const maxPages = 10;
+    const maxPages = 50; // Allow up to 7,500 records per customer
 
     do {
       const params: SalesOrderListParams = {
@@ -216,6 +285,12 @@ export class ConductorClient {
       cursor = response.nextCursor;
       page++;
     } while (cursor && page < maxPages);
+
+    if (cursor && page >= maxPages) {
+      console.warn(
+        `Pagination limit hit for sales orders (customer ${customerId}) - data may be incomplete`
+      );
+    }
 
     return salesOrders;
   }
@@ -243,7 +318,7 @@ export class ConductorClient {
     const invoices: QBInvoice[] = [];
     let cursor: string | undefined = undefined;
     let page = 0;
-    const maxPages = 10;
+    const maxPages = 50; // Allow up to 7,500 records per customer
 
     do {
       const params: InvoiceListParams = {
@@ -264,6 +339,12 @@ export class ConductorClient {
       cursor = response.nextCursor;
       page++;
     } while (cursor && page < maxPages);
+
+    if (cursor && page >= maxPages) {
+      console.warn(
+        `Pagination limit hit for invoices (customer ${customerId}) - data may be incomplete`
+      );
+    }
 
     return invoices;
   }

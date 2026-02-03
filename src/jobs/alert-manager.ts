@@ -19,21 +19,21 @@ import {
   findMatchingSalesOrder,
   findMatchingEstimate,
 } from "@/quickbooks/job-documents.js";
-import { findSosShouldBeClosed } from "@/quickbooks/invoice-so-matcher.js";
+import { findSosShouldBeClosed, findOverbilledMatches } from "@/quickbooks/invoice-so-matcher.js";
 
 const ESCALATION_HOURS = 4;
 
-// Module-level cached matcher to avoid repeated API calls for customer list
-let cachedMatcher: ReturnType<typeof createCustomerMatcher> | null = null;
-let matcherClient: ConductorClient | null = null;
-
-function getOrCreateMatcher(client: ConductorClient): ReturnType<typeof createCustomerMatcher> {
-  if (cachedMatcher && matcherClient === client) {
-    return cachedMatcher;
+/**
+ * Helper to safely create a ConductorClient
+ * Returns null if QB credentials are not available
+ */
+function getQbClient(): ConductorClient | null {
+  try {
+    return new ConductorClient();
+  } catch (error) {
+    console.warn("QB client not available:", error);
+    return null;
   }
-  cachedMatcher = createCustomerMatcher(client);
-  matcherClient = client;
-  return cachedMatcher;
 }
 
 export interface AlertSummary {
@@ -75,15 +75,8 @@ export async function analyzeNewPoEmails(
   const existingThreadKeys = new Set(existingAlerts.map((a) => a.threadKey));
 
   // Initialize QB client and matcher
-  let client: ConductorClient | null = null;
-  let matcher: ReturnType<typeof createCustomerMatcher> | null = null;
-
-  try {
-    client = new ConductorClient();
-    matcher = getOrCreateMatcher(client);
-  } catch (error) {
-    console.warn("QB client not available:", error);
-  }
+  const client = getQbClient();
+  const matcher = client ? createCustomerMatcher(client) : null;
 
   for (const thread of poReceivedThreads) {
     // Skip if alert already exists for this thread
@@ -136,9 +129,10 @@ export async function analyzeNewPoEmails(
       continue;
     }
 
-    const matchResult = await matcher.match(thread.contactEmail!, thread.contactName || undefined);
+    // Get all customer matches (domain mapping may return multiple)
+    const allMatches = await matcher.matchAll(thread.contactEmail!, thread.contactName || undefined);
 
-    if (!matchResult) {
+    if (allMatches.length === 0) {
       const alert = await createAlert({
         ...baseAlert,
         alertType: "no_qb_customer",
@@ -148,18 +142,53 @@ export async function analyzeNewPoEmails(
       continue;
     }
 
+    // Check all matched customers for a matching SO
+    let matchResult = allMatches[0]; // Default to first match
+    let matchingSO: ReturnType<typeof findMatchingSalesOrder> = null;
+    let matchingEst: ReturnType<typeof findMatchingEstimate> = null;
+
+    for (const candidate of allMatches) {
+      try {
+        const docs = await getCustomerJobDocuments(client, candidate.customerId);
+        const so = findMatchingSalesOrder(
+          docs,
+          poDetails?.poNumber || undefined,
+          poDetails?.total || undefined
+        );
+
+        if (so) {
+          // Found a matching SO - use this customer
+          matchResult = candidate;
+          matchingSO = so;
+          break;
+        }
+
+        // Track first matching estimate (fallback)
+        if (!matchingEst) {
+          const est = findMatchingEstimate(
+            docs,
+            poDetails?.poNumber || undefined,
+            poDetails?.total || undefined
+          );
+          if (est) {
+            matchResult = candidate;
+            matchingEst = est;
+          }
+        }
+      } catch (error) {
+        // Log error but continue checking other customers
+        console.error(
+          `Failed to fetch docs for customer ${candidate.customerId} (${candidate.customerName}):`,
+          error instanceof Error ? error.message : error
+        );
+        continue;
+      }
+    }
+
     // Update with customer match info
     baseAlert.qbCustomerId = matchResult.customerId;
     baseAlert.qbCustomerName = matchResult.customerName;
     baseAlert.matchConfidence = matchResult.confidence;
-
-    // Check for matching Sales Order
-    const docs = await getCustomerJobDocuments(client, matchResult.customerId);
-    const matchingSO = findMatchingSalesOrder(
-      docs,
-      poDetails?.poNumber || undefined,
-      poDetails?.total || undefined
-    );
 
     if (matchingSO) {
       // PO has corresponding SO - informational alert
@@ -176,13 +205,6 @@ export async function analyzeNewPoEmails(
       console.log(`PO with SO: ${thread.contactEmail} → SO ${matchingSO.refNumber}`);
       continue;
     }
-
-    // Check for matching Estimate
-    const matchingEst = findMatchingEstimate(
-      docs,
-      poDetails?.poNumber || undefined,
-      poDetails?.total || undefined
-    );
 
     if (matchingEst) {
       baseAlert.estimateId = matchingEst.id;
@@ -233,16 +255,15 @@ export async function checkEscalations(): Promise<QbSyncAlert[]> {
   console.log(`Checking ${candidateAlerts.length} alerts for escalation...`);
 
   // Initialize QB client
-  let client: ConductorClient | null = null;
-  try {
-    client = new ConductorClient();
-  } catch (error) {
-    console.warn("QB client not available for escalation check:", error);
+  const client = getQbClient();
+  if (!client) {
     // Escalate all candidates without re-checking QB (conservative - better to alert than miss)
     console.warn(`Escalating ${candidateAlerts.length} alerts without QB verification`);
     for (const alert of candidateAlerts) {
       const escalated = await escalateAlert(alert);
-      escalations.push(escalated);
+      if (escalated) {
+        escalations.push(escalated);
+      }
     }
     return escalations;
   }
@@ -264,7 +285,9 @@ export async function checkEscalations(): Promise<QbSyncAlert[]> {
     if (!alert.qbCustomerId) {
       // Can't check QB without customer ID - escalate anyway
       const escalated = await escalateAlert(alert);
-      escalations.push(escalated);
+      if (escalated) {
+        escalations.push(escalated);
+      }
       continue;
     }
 
@@ -273,7 +296,9 @@ export async function checkEscalations(): Promise<QbSyncAlert[]> {
     if (!docs) {
       // Shouldn't happen, but escalate to be safe
       const escalated = await escalateAlert(alert);
-      escalations.push(escalated);
+      if (escalated) {
+        escalations.push(escalated);
+      }
       continue;
     }
 
@@ -290,8 +315,10 @@ export async function checkEscalations(): Promise<QbSyncAlert[]> {
     } else {
       // Still no SO - escalate
       const escalated = await escalateAlert(alert);
-      escalations.push(escalated);
-      console.log(`Alert ${alert.id} escalated: still no SO after ${ESCALATION_HOURS}h`);
+      if (escalated) {
+        escalations.push(escalated);
+        console.log(`Alert ${alert.id} escalated: still no SO after ${ESCALATION_HOURS}h`);
+      }
     }
   }
 
@@ -321,19 +348,16 @@ export async function checkInvoiceSoMismatch(): Promise<QbSyncAlert[]> {
     return alerts;
   }
 
-  let client: ConductorClient | null = null;
-  try {
-    client = new ConductorClient();
-  } catch (error) {
-    console.warn("QB client not available for invoice/SO check:", error);
+  const client = getQbClient();
+  if (!client) {
     return alerts;
   }
 
   for (const customerId of customerIds) {
     const docs = await getCustomerJobDocuments(client, customerId, { includeFullyInvoiced: true });
 
-    // Use LLM-based matching to find SOs that should be closed
-    const sosShouldClose = await findSosShouldBeClosed(docs.salesOrders, docs.invoices);
+    // Use PO# + total matching to find SOs that should be closed
+    const sosShouldClose = findSosShouldBeClosed(docs.salesOrders, docs.invoices);
 
     for (const match of sosShouldClose) {
       // Check if alert already exists
@@ -387,11 +411,8 @@ export async function checkInvoiceSoMismatch(): Promise<QbSyncAlert[]> {
 export async function checkAndResolveAlerts(): Promise<QbSyncAlert[]> {
   const resolved: QbSyncAlert[] = [];
 
-  let client: ConductorClient | null = null;
-  try {
-    client = new ConductorClient();
-  } catch (error) {
-    console.warn("QB client not available for auto-resolution:", error);
+  const client = getQbClient();
+  if (!client) {
     return resolved;
   }
 
@@ -434,7 +455,7 @@ export async function checkAndResolveAlerts(): Promise<QbSyncAlert[]> {
       )
     );
 
-  const matcher = getOrCreateMatcher(client);
+  const matcher = createCustomerMatcher(client);
 
   for (const alert of noCustomerAlerts) {
     if (!alert.contactEmail) continue;
@@ -588,16 +609,31 @@ async function createAlert(data: NewQbSyncAlert): Promise<QbSyncAlert> {
   return alert;
 }
 
-async function escalateAlert(alert: QbSyncAlert): Promise<QbSyncAlert> {
+async function escalateAlert(alert: QbSyncAlert): Promise<QbSyncAlert | null> {
   const now = new Date();
+
+  // Optimistic locking: only update if version matches (prevents duplicate escalations)
   const [updated] = await db
     .update(schema.qbSyncAlerts)
     .set({
       alertType: "po_missing_so",
       escalatedAt: now,
+      version: sql`${schema.qbSyncAlerts.version} + 1`,
     })
-    .where(eq(schema.qbSyncAlerts.id, alert.id))
+    .where(
+      and(
+        eq(schema.qbSyncAlerts.id, alert.id),
+        eq(schema.qbSyncAlerts.version, alert.version ?? 1),
+        isNull(schema.qbSyncAlerts.escalatedAt) // Extra safety: not already escalated
+      )
+    )
     .returning();
+
+  if (!updated) {
+    console.log(`Alert ${alert.id} already modified by another process, skipping escalation`);
+    return null;
+  }
+
   return updated;
 }
 

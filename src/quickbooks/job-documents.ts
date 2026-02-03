@@ -77,15 +77,85 @@ export async function getCustomerJobDocuments(
 }
 
 // ============================================================
-// Sales Order Helpers (Primary)
+// Shared Matching Helper
 // ============================================================
 
-/**
- * Get open sales orders (not fully invoiced, not manually closed)
- */
-export function getOpenSalesOrders(docs: CustomerJobDocuments): QBSalesOrder[] {
-  return docs.salesOrders.filter((so) => !so.isFullyInvoiced && !so.isManuallyClosed);
+interface DocumentWithRefAndAmount {
+  refNumber?: string | null;
+  memo?: string | null;
+  totalAmount?: string | null;
 }
+
+/**
+ * Match a document by PO number or amount
+ * Shared logic for findMatchingSalesOrder and findMatchingEstimate
+ *
+ * PO matching rules:
+ * - PO# must be at least 3 chars to match
+ * - Exact match: "PO123" matches ref "PO123"
+ * - Prefix match with letter suffix: "123" matches "123A", "123B"
+ * - Prevents false positives like "PO 1" matching "PO 10"
+ */
+function matchByPoOrAmount<T extends DocumentWithRefAndAmount>(
+  documents: T[],
+  poNumber?: string,
+  poAmount?: number
+): T | null {
+  for (const doc of documents) {
+    // Match by PO number in ref or memo
+    if (poNumber) {
+      const poNorm = poNumber.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+      // Require minimum length to prevent overly broad matches
+      if (poNorm.length >= 3) {
+        const refNorm = (doc.refNumber || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const memoNorm = (doc.memo || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+        // Exact match
+        if (refNorm === poNorm || memoNorm === poNorm) {
+          return doc;
+        }
+
+        // Prefix match: PO# followed by a single letter suffix (e.g., "123" matches "123a")
+        // This handles cases where SO has suffix like "PO123-A" or "PO123R1"
+        const prefixPattern = new RegExp(`^${poNorm}[a-z]$`);
+        if (prefixPattern.test(refNorm) || prefixPattern.test(memoNorm)) {
+          return doc;
+        }
+
+        // Also check if ref/memo starts with PO# and has revision suffix like "-R1", "-REV1"
+        const revisionPattern = new RegExp(`^${poNorm}(r|rev)?\\d*$`);
+        if (revisionPattern.test(refNorm) || revisionPattern.test(memoNorm)) {
+          return doc;
+        }
+      }
+    }
+
+    // Match by amount (within 5% tolerance for base amount, or within tax range)
+    if (poAmount && doc.totalAmount) {
+      const docAmount = parseFloat(doc.totalAmount);
+      const baseTolerance = poAmount * 0.05;
+
+      // Check base tolerance (5%)
+      if (Math.abs(docAmount - poAmount) <= baseTolerance) {
+        return doc;
+      }
+
+      // Also check if doc amount is within tax range (13% HST typical for Ontario)
+      // This handles cases where PO is pre-tax and SO/Invoice is post-tax
+      const taxTolerance = poAmount * 0.15; // Up to 15% for tax + minor adjustments
+      if (docAmount > poAmount && docAmount <= poAmount * 1.15) {
+        return doc;
+      }
+    }
+  }
+
+  return null;
+}
+
+// ============================================================
+// Sales Order Helpers (Primary)
+// ============================================================
 
 /**
  * Find a sales order that might match a PO
@@ -96,29 +166,7 @@ export function findMatchingSalesOrder(
   poNumber?: string,
   poAmount?: number
 ): QBSalesOrder | null {
-  for (const so of docs.salesOrders) {
-    // Match by PO number in ref or memo
-    if (poNumber) {
-      const poNorm = poNumber.toLowerCase().replace(/[^a-z0-9]/g, "");
-      const refNorm = (so.refNumber || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-      const memoNorm = (so.memo || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-
-      if (refNorm.includes(poNorm) || memoNorm.includes(poNorm)) {
-        return so;
-      }
-    }
-
-    // Match by amount (within 5% tolerance)
-    if (poAmount && so.totalAmount) {
-      const soAmount = parseFloat(so.totalAmount);
-      const tolerance = poAmount * 0.05;
-      if (Math.abs(soAmount - poAmount) <= tolerance) {
-        return so;
-      }
-    }
-  }
-
-  return null;
+  return matchByPoOrAmount(docs.salesOrders, poNumber, poAmount);
 }
 
 // ============================================================
@@ -134,39 +182,24 @@ export function findMatchingEstimate(
   poNumber?: string,
   poAmount?: number
 ): QBEstimate | null {
-  for (const est of docs.estimates) {
-    // Match by ref number
-    if (poNumber) {
-      const poNorm = poNumber.toLowerCase().replace(/[^a-z0-9]/g, "");
-      const refNorm = (est.refNumber || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-      const memoNorm = (est.memo || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-
-      if (refNorm.includes(poNorm) || memoNorm.includes(poNorm)) {
-        return est;
-      }
-    }
-
-    // Match by amount (within 5% tolerance)
-    if (poAmount && est.totalAmount) {
-      const estAmount = parseFloat(est.totalAmount);
-      const tolerance = poAmount * 0.05;
-      if (Math.abs(estAmount - poAmount) <= tolerance) {
-        return est;
-      }
-    }
-  }
-
-  return null;
+  return matchByPoOrAmount(docs.estimates, poNumber, poAmount);
 }
 
 // ============================================================
-// Invoice Helpers
+// Internal Helpers (used by getJobDocumentsSummary)
 // ============================================================
+
+/**
+ * Get open sales orders (not fully invoiced, not manually closed)
+ */
+function getOpenSalesOrders(docs: CustomerJobDocuments): QBSalesOrder[] {
+  return docs.salesOrders.filter((so) => !so.isFullyInvoiced && !so.isManuallyClosed);
+}
 
 /**
  * Get unpaid invoices
  */
-export function getUnpaidInvoices(docs: CustomerJobDocuments): QBInvoice[] {
+function getUnpaidInvoices(docs: CustomerJobDocuments): QBInvoice[] {
   return docs.invoices.filter((inv) => !inv.isPaid);
 }
 

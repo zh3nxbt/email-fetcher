@@ -126,6 +126,9 @@ export const poAttachments = pgTable("email_po_attachments", {
   analysisJson: jsonb("analysis_json"), // full extraction result
   analyzedAt: timestamp("analyzed_at"),
   uploadedAt: timestamp("uploaded_at").notNull().defaultNow(),
+  // PO validation (smart detection)
+  isValidPo: boolean("is_valid_po"), // NULL = not analyzed, true = confirmed PO, false = not a PO
+  notPoReason: text("not_po_reason"), // Why it's not a PO (e.g., "This is a quotation")
 });
 
 // QB Sync Alerts - persists alerts for historical tracking and dashboard UI
@@ -173,6 +176,9 @@ export const qbSyncAlerts = pgTable("qb_sync_alerts", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastNotifiedAt: timestamp("last_notified_at"),
   notificationCount: integer("notification_count").notNull().default(0),
+
+  // Optimistic locking - prevents race conditions during concurrent updates
+  version: integer("version").notNull().default(1),
 });
 
 // Type exports

@@ -6,6 +6,7 @@ const anthropic = new Anthropic();
 
 // Model - Sonnet only for reliable classification
 const MODEL_SONNET = "claude-sonnet-4-20250514";
+const MODEL_HAIKU = "claude-3-5-haiku-latest";
 
 // Truncation limits
 const BODY_LIMIT_SINGLE = 1500;
@@ -503,5 +504,164 @@ Respond with just the summary text, no JSON or formatting.`;
   } catch (error) {
     console.error("Summary generation error:", error);
     return "Summary unavailable";
+  }
+}
+
+// ============================================================
+// Attachment Ranking for PO Detection
+// ============================================================
+
+export interface AttachmentInfo {
+  filename: string;
+  contentType: string;
+  size: number; // bytes
+}
+
+export interface RankedAttachment {
+  filename: string;
+  rank: number;
+  isPoCandidate: boolean;
+  reason: string;
+}
+
+/**
+ * Rank attachments by likelihood of being a PO document.
+ * Uses Haiku for speed/cost (simple filename analysis).
+ *
+ * @param attachments - List of attachment metadata
+ * @param subject - Email subject for context
+ * @param sender - Sender email/name for context
+ * @returns Ranked list of attachments, highest likelihood first
+ */
+export async function rankAttachmentsForPo(
+  attachments: AttachmentInfo[],
+  subject: string,
+  sender: string
+): Promise<RankedAttachment[]> {
+  if (attachments.length === 0) {
+    return [];
+  }
+
+  // Pre-filter: exclude obvious non-PO files
+  const candidateAttachments = attachments.filter((att) => {
+    const lowerFilename = att.filename.toLowerCase();
+    const lowerType = att.contentType.toLowerCase();
+
+    // Exclude small images (likely signatures/logos)
+    if (att.size < 100 * 1024) { // < 100KB
+      if (
+        lowerType.includes("image/") ||
+        lowerFilename.endsWith(".png") ||
+        lowerFilename.endsWith(".jpg") ||
+        lowerFilename.endsWith(".jpeg") ||
+        lowerFilename.endsWith(".gif")
+      ) {
+        return false;
+      }
+    }
+
+    // Only include documents that could be POs
+    const isDocument =
+      lowerFilename.endsWith(".pdf") ||
+      lowerFilename.endsWith(".doc") ||
+      lowerFilename.endsWith(".docx") ||
+      lowerType.includes("pdf") ||
+      lowerType.includes("msword") ||
+      lowerType.includes("wordprocessingml");
+
+    return isDocument;
+  });
+
+  if (candidateAttachments.length === 0) {
+    // All attachments were filtered out - return empty with reasons
+    return attachments.map((att) => ({
+      filename: att.filename,
+      rank: 999,
+      isPoCandidate: false,
+      reason: "Not a document type (image or unsupported format)",
+    }));
+  }
+
+  // If only one document, skip AI call
+  if (candidateAttachments.length === 1) {
+    return [
+      {
+        filename: candidateAttachments[0].filename,
+        rank: 1,
+        isPoCandidate: true,
+        reason: "Only document attachment",
+      },
+    ];
+  }
+
+  // Use AI to rank multiple documents
+  const attachmentsJson = candidateAttachments.map((att, idx) => ({
+    index: idx,
+    filename: att.filename,
+    size_kb: Math.round(att.size / 1024),
+  }));
+
+  const prompt = `Rank these email attachments by likelihood of being a Purchase Order (PO).
+
+Email subject: "${subject}"
+From: ${sender}
+
+Attachments:
+${JSON.stringify(attachmentsJson, null, 2)}
+
+RANKING RULES:
+- HIGH priority: Files with "PO", "Purchase Order", "Order" in filename
+- MEDIUM priority: Generic PDFs/docs without clear naming
+- LOW priority: Files with "terms", "conditions", "T&C", "agreement" in name
+- EXCLUDE: Files that are clearly not POs (logos, signatures, catalogs)
+
+Return JSON only:
+{"rankings": [{"index": 0, "rank": 1, "is_po_candidate": true, "reason": "..."}, ...]}
+
+Rank 1 = most likely PO. Include ALL attachments.`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: MODEL_HAIKU,
+      max_tokens: 500,
+      system: "You are a JSON-only classifier. Always respond with valid JSON.",
+      messages: [
+        { role: "user", content: prompt },
+        { role: "assistant", content: "{" },
+      ],
+    });
+
+    const content = response.content[0];
+    if (content.type !== "text") {
+      throw new Error("Unexpected response type");
+    }
+
+    const parsed = JSON.parse("{" + content.text) as {
+      rankings: Array<{
+        index: number;
+        rank: number;
+        is_po_candidate: boolean;
+        reason: string;
+      }>;
+    };
+
+    // Map back to filenames and sort by rank
+    const results: RankedAttachment[] = parsed.rankings.map((r) => ({
+      filename: candidateAttachments[r.index]?.filename || `unknown-${r.index}`,
+      rank: r.rank,
+      isPoCandidate: r.is_po_candidate,
+      reason: r.reason,
+    }));
+
+    return results.sort((a, b) => a.rank - b.rank);
+  } catch (error) {
+    console.error("Attachment ranking error:", error);
+    // Fallback: return all candidates as equal
+    return candidateAttachments.map((att, idx) => ({
+      filename: att.filename,
+      rank: idx + 1,
+      isPoCandidate: true,
+      reason: "Ranking failed - treating as potential PO",
+    }));
   }
 }

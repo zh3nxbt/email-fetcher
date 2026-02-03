@@ -28,7 +28,7 @@ The system needs to access these QuickBooks entities:
 ```
 src/
   quickbooks/                    # QB integration
-    conductor-client.ts          # ✅ Conductor API client
+    conductor-client.ts          # ✅ Conductor API client (with retry, timeout, rate limiting)
     types.ts                     # ✅ QB entity types (Customer, Estimate, SalesOrder, Invoice)
     customer-matcher.ts          # ✅ Fuzzy matching email contacts to QB customers
     customer-cache.ts            # ✅ 24h TTL cache for QB customer list
@@ -39,11 +39,13 @@ src/
     test-connection.ts           # ✅ Test script (npm run qb:test)
     refresh-cache.ts             # ✅ Manual cache refresh (npm run qb:refresh-customers)
   jobs/                          # Job tracking
-    sync-analyzer.ts             # ✅ Compare emails vs QB data (legacy, console-only)
-    alert-manager.ts             # ✅ Alert persistence, escalation, auto-resolution
+    alert-manager.ts             # ✅ Alert persistence, escalation, auto-resolution (replaced sync-analyzer.ts)
     alert-templates.ts           # ✅ HTML email templates for alerts
     run-jobs-report.ts           # ✅ CLI entry point (npm run jobs:check)
-    test-sync-analyzer.ts        # ✅ Test script (npm run qb:sync-analyze)
+  storage/                       # Attachment storage
+    po-attachment-manager.ts     # ✅ PO PDF storage + analysis caching (includes DOCX conversion)
+    supabase-client.ts           # ✅ Supabase Storage client
+    docx-pdf.d.ts                # ✅ Type definitions for docx-pdf library
 data/
   qb-customers.json              # Cached QB customer list (auto-generated)
 ```
@@ -240,8 +242,7 @@ Implemented visual PDF analysis for extracting PO details from email attachments
 - `src/report/pdf-extractor.ts` - sends PDF as base64 to Claude for visual analysis
 - Replaces old text-extraction approach (pdf-parse) which lost formatting
 - Test script: `src/report/test-pdf-vision.ts`
-
-**TODO:** Add DOCX support (Claude doesn't support DOCX directly)
+- **DOCX support** ✅ - Converted via `docx-pdf` library before analysis (see `src/storage/po-attachment-manager.ts`)
 
 ## Matching Strategy
 Since PO numbers may not directly match estimate numbers:
@@ -336,6 +337,49 @@ Grouped into 8 threads (with full history)
 - `src/report/run-report.ts` → CLI flag parsing
 - `src/jobs/run-jobs-report.ts` → CLI flag parsing
 
+### QB Sync Architecture & Reliability Review (Feb 2026)
+
+Comprehensive reliability audit identified and fixed 15 issues across 3 categories:
+
+**Category A: Concurrency & Data Integrity**
+| Fix | Issue | Solution |
+|-----|-------|----------|
+| A1 | Race condition during escalation | Added optimistic locking with `version` column |
+| A2 | Checkpoint saved before email succeeds | Moved `saveJobCheckTime()` inside try-catch after email |
+| A3 | Duplicate escalations possible | `escalateAlert()` checks version + `escalatedAt` is null |
+
+**Category B: API Reliability**
+| Fix | Issue | Solution |
+|-----|-------|----------|
+| B1 | No retry logic for transient failures | Added `fetchWithRetry()` with exponential backoff (3 retries) |
+| B2 | No fetch timeouts | Added 30-second timeout via `AbortController` |
+| B3 | Hard pagination limit (10 pages) | Increased to 50-100 pages with warning on limit hit |
+| B4 | No rate limit handling | Detect 429, read `Retry-After` header, wait and retry |
+| B5 | Cascading failures | Per-customer try-catch in `analyzeNewPoEmails()` |
+| B6 | Cache file corruption | `loadCache()` validates structure, returns null on error |
+
+**Category C: Matching Accuracy**
+| Fix | Issue | Solution |
+|-----|-------|----------|
+| C1 | PO substring too permissive | Exact match or prefix-with-suffix only, min 3 chars |
+| C2 | No tax awareness | Added 15% tax tolerance for amount matching |
+| C3 | Subdomain fallback unsafe | Only allow safe patterns (mail, sales, orders, etc.) |
+| C4 | 1-word name matching | Require min 4 chars unless 90%+ similarity |
+| C5 | Sent email trust too broad | Filter out gmail.com, yahoo.com, etc. |
+| C6 | Email domain extraction | Extract main domain before TLD, not first subdomain |
+
+**Files modified:**
+- `src/quickbooks/conductor-client.ts` - B1, B2, B3, B4
+- `src/quickbooks/job-documents.ts` - C1, C2
+- `src/jobs/alert-manager.ts` - A1, A3, B5
+- `src/jobs/run-jobs-report.ts` - A2
+- `src/db/schema.ts` - A3 (version column)
+- `src/quickbooks/customer-matcher.ts` - C3, C4, C6
+- `src/quickbooks/customer-cache.ts` - B6
+- `src/quickbooks/trusted-domains.ts` - C5
+
+**Database migration required:** Run `npm run db:push` to add `version` column to `qb_sync_alerts`.
+
 ## Future Enhancements
 
 ### Phase 7: `job_not_invoiced` Alert (Planned)
@@ -363,4 +407,4 @@ Flag Sales Orders that are likely complete but haven't been invoiced.
 - Manual alert dismissal via API
 - Auto-update QB estimate status via API (if Conductor supports writes)
 - Sales Order conversion workflow
-- DOCX attachment support (convert to PDF or extract text)
+- ~~DOCX attachment support~~ ✅ Done - converted via `docx-pdf` library

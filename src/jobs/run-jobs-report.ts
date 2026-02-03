@@ -12,6 +12,8 @@ import "dotenv/config";
 import { toZonedTime, fromZonedTime } from "date-fns-tz";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
+
+const JOBS_CHECK_KEY = "_jobs_check"; // Special key in email_sync_metadata
 import { syncEmails } from "@/sync/syncer";
 import { categorizeThreads } from "@/report/categorizer";
 import type { TimeWindow, CategorizedThread } from "@/report/types";
@@ -72,21 +74,64 @@ Options:
   --reanalyze         Force re-analysis of all threads (bypass cache)
 
 Examples:
-  npm run jobs:check                         # Run hourly check and send alert email
+  npm run jobs:check                         # Check from last run to now (incremental)
   npm run jobs:check -- --preview            # Preview alerts in console
   npm run jobs:check -- --morning            # Send morning review email
   npm run jobs:check -- --since=2025-01-01   # Check all POs from Jan 1 to today
   npm run jobs:check -- --since=2025-01-01 --preview  # Preview historical check
   npm run jobs:check -- --reanalyze          # Re-analyze all threads with AI
+
+Note: The default check uses incremental timestamps stored in email_sync_metadata.
+      First run falls back to 2 hours. Subsequent runs pick up from last checkpoint.
 `);
 }
 
 /**
- * Get hourly check window (last 2 hours)
+ * Get last job check timestamp from database
+ * Returns null if never run before
  */
-function getHourlyWindow(): TimeWindow {
+async function getLastJobCheckTime(): Promise<Date | null> {
+  const result = await db
+    .select({ lastSyncAt: schema.syncMetadata.lastSyncAt })
+    .from(schema.syncMetadata)
+    .where(eq(schema.syncMetadata.mailbox, JOBS_CHECK_KEY));
+
+  return result.length > 0 ? result[0].lastSyncAt : null;
+}
+
+/**
+ * Save current timestamp as last job check time
+ */
+async function saveJobCheckTime(timestamp: Date): Promise<void> {
+  const existing = await db
+    .select({ id: schema.syncMetadata.id })
+    .from(schema.syncMetadata)
+    .where(eq(schema.syncMetadata.mailbox, JOBS_CHECK_KEY));
+
+  if (existing.length > 0) {
+    await db
+      .update(schema.syncMetadata)
+      .set({ lastSyncAt: timestamp })
+      .where(eq(schema.syncMetadata.mailbox, JOBS_CHECK_KEY));
+  } else {
+    await db.insert(schema.syncMetadata).values({
+      mailbox: JOBS_CHECK_KEY,
+      lastSyncAt: timestamp,
+    });
+  }
+}
+
+/**
+ * Get hourly check window (from last check to now)
+ * Falls back to 2 hours if no previous check recorded
+ */
+async function getHourlyWindow(): Promise<TimeWindow> {
   const now = new Date();
-  const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+  const lastCheck = await getLastJobCheckTime();
+
+  // Fall back to 2 hours if never run before
+  const start = lastCheck || new Date(now.getTime() - 2 * 60 * 60 * 1000);
+
   return { start, end: now };
 }
 
@@ -258,14 +303,18 @@ async function runHistoricalCheck(options: CliOptions): Promise<void> {
 async function runHourlyCheck(options: CliOptions): Promise<void> {
   console.log("=== QB Sync Hourly Check ===\n");
 
+  // Get window first to show what we're checking
+  const window = await getHourlyWindow();
+  const lastCheckInfo = window.start.getTime() < Date.now() - 2 * 60 * 60 * 1000
+    ? `(from last check: ${window.start.toLocaleString("en-US", { timeZone: TIMEZONE })})`
+    : "(first run, using 2h fallback)";
+  console.log(`Time window: ${window.start.toISOString()} to ${window.end.toISOString()}`);
+  console.log(`${lastCheckInfo}\n`);
+
   // Sync recent emails
-  console.log("Syncing emails (last 2 hours)...");
+  console.log("Syncing emails...");
   const syncResult = await syncEmails();
   console.log(`Synced ${syncResult.emailsSynced} emails\n`);
-
-  // Get recent threads
-  const window = getHourlyWindow();
-  console.log(`Checking emails from ${window.start.toISOString()} to ${window.end.toISOString()}\n`);
 
   const threads = await categorizeThreads(window, { reanalyze: options.reanalyze });
   const poReceivedThreads = threads.filter((t) => t.itemType === "po_received");
@@ -288,6 +337,10 @@ async function runHourlyCheck(options: CliOptions): Promise<void> {
 
   if (!hasContent) {
     console.log("\nNo new activity to report.");
+    // Save checkpoint even with no activity (but not in preview mode)
+    if (!options.preview) {
+      await saveJobCheckTime(window.end);
+    }
     return;
   }
 
@@ -312,16 +365,26 @@ async function runHourlyCheck(options: CliOptions): Promise<void> {
     });
 
     const subject = `QB Sync Alert - ${timeStr}`;
-    await sendReportEmail(subject, html, ALERT_RECIPIENT);
 
-    // Mark alerts as notified
-    const alertIds = [
-      ...result.newAlerts.map((a) => a.id),
-      ...result.escalations.map((a) => a.id),
-    ];
-    await markAlertsNotified(alertIds);
+    // IMPORTANT: Only save checkpoint AFTER email is confirmed sent
+    // This prevents lost alerts if SMTP fails mid-send
+    try {
+      await sendReportEmail(subject, html, ALERT_RECIPIENT);
 
-    console.log(`\nAlert email sent.`);
+      // Mark alerts as notified
+      const alertIds = [
+        ...result.newAlerts.map((a) => a.id),
+        ...result.escalations.map((a) => a.id),
+      ];
+      await markAlertsNotified(alertIds);
+
+      // Save checkpoint timestamp for next run (only after email succeeds)
+      await saveJobCheckTime(window.end);
+      console.log(`\nAlert email sent.`);
+    } catch (emailError) {
+      console.error("Email failed - NOT saving checkpoint to allow retry on next run:", emailError);
+      throw emailError;
+    }
   }
 }
 

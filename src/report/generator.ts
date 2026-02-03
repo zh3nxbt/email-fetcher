@@ -17,7 +17,6 @@ import {
   countEmailsByDirection,
   isLastEmailFromUs,
 } from "./categorizer";
-import { enrichThreadsWithPoDetails } from "./pdf-extractor";
 import { identifyTodos } from "./todo-analyzer";
 import {
   generateDailySummaryHtml,
@@ -276,11 +275,7 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
   let threads = await categorizeThreads(window, { reanalyze: options.reanalyze });
   console.log(`  Found ${threads.length} threads`);
 
-  // Step 3: Enrich vendor threads with PO details
-  console.log("\nStep 3: Extracting PO details from PDFs...");
-  threads = await enrichThreadsWithPoDetails(threads);
-
-  // Step 4: Identify new todos from today's activity
+  // Step 3: Identify new todos from today's activity
   console.log("\nStep 4: Identifying new action items...");
   const newTodosRaw = identifyTodos(threads);
   console.log(`  Found ${newTodosRaw.length} new action items`);

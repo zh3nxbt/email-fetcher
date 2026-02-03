@@ -55,3 +55,64 @@ export function getRecentMismatches(limit: number = 50): Array<{
     })
     .filter(Boolean);
 }
+
+// ============================================================
+// PO Detection Failure Logging
+// ============================================================
+
+export type PoDetectionFailureStage =
+  | "no_attachments"     // Thread marked po_received but no attachments
+  | "no_po_candidate"    // Attachments found but none look like POs
+  | "fetch_failed"       // IMAP fetch failed
+  | "analysis_failed"    // Claude analysis failed
+  | "not_a_po";          // AI determined document is not a PO
+
+export interface PoDetectionFailure {
+  stage: PoDetectionFailureStage;
+  threadKey: string;
+  subject: string;
+  contactEmail: string | null;
+  filename?: string;
+  reason?: string;
+  attemptedFiles?: Array<{
+    filename: string;
+    result: "success" | "fetch_failed" | "not_a_po";
+    reason?: string;
+  }>;
+}
+
+// Log PO detection failure to /logs/po-detection-failures.log
+export function logPoDetectionFailure(failure: PoDetectionFailure): void {
+  const timestamp = new Date().toISOString();
+  const logFile = path.join(LOGS_DIR, "po-detection-failures.log");
+
+  const logEntry = JSON.stringify({
+    timestamp,
+    ...failure,
+  }) + "\n";
+
+  fs.appendFileSync(logFile, logEntry);
+}
+
+// Get recent PO detection failures for review
+export function getRecentPoFailures(limit: number = 50): Array<PoDetectionFailure & { timestamp: string }> {
+  const logFile = path.join(LOGS_DIR, "po-detection-failures.log");
+
+  if (!fs.existsSync(logFile)) {
+    return [];
+  }
+
+  const content = fs.readFileSync(logFile, "utf-8");
+  const lines = content.trim().split("\n").filter(Boolean);
+
+  return lines
+    .slice(-limit)
+    .map(line => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}

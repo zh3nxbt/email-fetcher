@@ -47,21 +47,33 @@ function cacheExists(): boolean {
 function isStale(): boolean {
   if (!cacheExists()) return true;
 
-  try {
-    const cache = loadCache();
-    const age = Date.now() - cache.timestamp;
-    return age >= CACHE_TTL_MS;
-  } catch {
-    return true;
-  }
+  const cache = loadCache();
+  if (!cache) return true;
+
+  const age = Date.now() - cache.timestamp;
+  return age >= CACHE_TTL_MS;
 }
 
 /**
  * Load cache from disk
+ * Returns null if cache is corrupted or unreadable
  */
-function loadCache(): CustomerCache {
-  const content = fs.readFileSync(CACHE_FILE, "utf-8");
-  return JSON.parse(content) as CustomerCache;
+function loadCache(): CustomerCache | null {
+  try {
+    const content = fs.readFileSync(CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(content) as CustomerCache;
+
+    // Validate cache structure
+    if (!parsed.customers || !Array.isArray(parsed.customers) || typeof parsed.timestamp !== "number") {
+      console.warn("Cache file has invalid structure, will refresh");
+      return null;
+    }
+
+    return parsed;
+  } catch (error) {
+    console.warn("Cache file corrupted or unreadable, will refresh:", error);
+    return null;
+  }
 }
 
 /**
@@ -83,8 +95,11 @@ export async function getCachedCustomers(
 ): Promise<QBCustomerMatch[]> {
   // Check if cache is fresh
   if (cacheExists() && !isStale()) {
-    console.log("Using cached QB customer list");
-    return loadCache().customers;
+    const cache = loadCache();
+    if (cache) {
+      console.log("Using cached QB customer list");
+      return cache.customers;
+    }
   }
 
   // Cache is stale or doesn't exist - refresh
@@ -123,20 +138,20 @@ export function getCacheStats(): {
     return { exists: false, isStale: true, customerCount: 0, ageHours: null };
   }
 
-  try {
-    const cache = loadCache();
-    const ageMs = Date.now() - cache.timestamp;
-    const ageHours = Math.round((ageMs / (60 * 60 * 1000)) * 10) / 10;
-
-    return {
-      exists: true,
-      isStale: isStale(),
-      customerCount: cache.customers.length,
-      ageHours,
-    };
-  } catch {
+  const cache = loadCache();
+  if (!cache) {
     return { exists: false, isStale: true, customerCount: 0, ageHours: null };
   }
+
+  const ageMs = Date.now() - cache.timestamp;
+  const ageHours = Math.round((ageMs / (60 * 60 * 1000)) * 10) / 10;
+
+  return {
+    exists: true,
+    isStale: isStale(),
+    customerCount: cache.customers.length,
+    ageHours,
+  };
 }
 
 /**

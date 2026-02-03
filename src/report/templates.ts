@@ -1,6 +1,7 @@
 import type { CategorizedThread, MorningReportData, DisplayTodo } from "./types";
 import type { MiddayReportData } from "./generator";
 import { getTodoPriority } from "./todo-analyzer";
+import { formatPoDetailsDisplay } from "./po-detector";
 
 // Styles shared across templates
 const styles = `
@@ -83,6 +84,27 @@ const styles = `
   .thread-label.po { color: #059669; }
   .thread-label.po-sent { color: #7c3aed; }
   .thread-label.rfq { color: #2563eb; }
+  .po-warning {
+    display: inline-block;
+    background-color: #fef3c7;
+    border: 1px solid #f59e0b;
+    color: #92400e;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+  }
+  .po-details {
+    display: inline-block;
+    background-color: #d1fae5;
+    color: #065f46;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+  }
   .thread-content {
     flex: 1;
     min-width: 0;
@@ -257,11 +279,38 @@ function renderThread(thread: CategorizedThread): string {
   const latestDate = getLatestEmailDate(thread);
   const timestamp = formatTimestamp(latestDate);
 
+  // For po_received threads, show PO details or warning
+  let poInfo = "";
+  if (thread.itemType === "po_received") {
+    if (thread.poDetails) {
+      // Show extracted PO info
+      const poNumber = thread.poDetails.poNumber || "";
+      const poTotal = thread.poDetails.total
+        ? `$${thread.poDetails.total.toLocaleString()}`
+        : "";
+      const poDisplay = poNumber && poTotal
+        ? `${poNumber} · ${poTotal}`
+        : poNumber || poTotal || "";
+      if (poDisplay) {
+        poInfo = `<span class="po-details" style="background-color: #d1fae5; color: #065f46; font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; margin-left: 8px;">${escapeHtml(poDisplay)}</span>`;
+      }
+    } else if (!thread.isSuspicious) {
+      // No PO details and not suspicious - might need review
+      poInfo = `<span class="po-warning" style="background-color: #fef3c7; border: 1px solid #f59e0b; color: #92400e; font-size: 10px; font-weight: 500; padding: 2px 6px; border-radius: 4px; margin-left: 8px;">Needs Review</span>`;
+    }
+  }
+
+  // For suspicious threads, show warning
+  let suspiciousWarning = "";
+  if (thread.isSuspicious) {
+    suspiciousWarning = `<span style="background-color: #fee2e2; border: 1px solid #f87171; color: #991b1b; font-size: 10px; font-weight: 500; padding: 2px 6px; border-radius: 4px; margin-left: 8px;">Untrusted Domain</span>`;
+  }
+
   return `
     <div class="thread-item">
       <div class="thread-label ${label.class}" style="color: ${label.color};">${label.text}</div>
       <div class="thread-content">
-        <div class="thread-subject">${escapeHtml(thread.subject)}<span class="email-count">${thread.emailCount}</span></div>
+        <div class="thread-subject">${escapeHtml(thread.subject)}<span class="email-count">${thread.emailCount}</span>${poInfo}${suspiciousWarning}</div>
         <div class="thread-from">${escapeHtml(thread.contactName || thread.contactEmail || "Unknown")}${timestamp ? ` <span style="color: #9ca3af; font-size: 12px;">· ${timestamp}</span>` : ""}</div>
         ${thread.summary ? `<div class="thread-summary">${escapeHtml(thread.summary)}</div>` : ""}
       </div>
@@ -711,7 +760,19 @@ export function generatePlainTextSummary(
   if (customerThreads.length > 0) {
     lines.push(`CUSTOMERS:`);
     for (const thread of customerThreads) {
-      lines.push(`  ${thread.subject}`);
+      let poInfo = "";
+      if (thread.itemType === "po_received") {
+        if (thread.poDetails) {
+          const poNumber = thread.poDetails.poNumber || "";
+          const poTotal = thread.poDetails.total ? `$${thread.poDetails.total.toLocaleString()}` : "";
+          poInfo = poNumber || poTotal ? ` [PO: ${poNumber}${poNumber && poTotal ? " " : ""}${poTotal}]` : "";
+        } else if (!thread.isSuspicious) {
+          poInfo = " [NEEDS REVIEW]";
+        } else {
+          poInfo = " [UNTRUSTED DOMAIN]";
+        }
+      }
+      lines.push(`  ${thread.subject}${poInfo}`);
       lines.push(`      ${thread.contactName || thread.contactEmail || "Unknown"}`);
       if (thread.summary) lines.push(`      ${thread.summary}`);
     }

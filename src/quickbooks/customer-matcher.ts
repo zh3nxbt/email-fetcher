@@ -4,15 +4,85 @@
  * Matches email contacts to QuickBooks customers using fuzzy matching
  */
 
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
 import { ConductorClient } from "./conductor-client.js";
 import type { QBCustomerMatch } from "./types.js";
+
+// ============================================================
+// Domain-to-Customer Mapping
+// ============================================================
+
+interface DomainMapping {
+  qbCustomerName?: string; // Single customer (legacy)
+  qbCustomerNames?: string[]; // Multiple customers
+  note?: string;
+}
+
+let domainMappings: Record<string, DomainMapping> | null = null;
+
+function loadDomainMappings(): Record<string, DomainMapping> {
+  if (domainMappings) return domainMappings;
+
+  const path = join(process.cwd(), "data", "domain-customer-mappings.json");
+  if (!existsSync(path)) {
+    domainMappings = {};
+    return domainMappings;
+  }
+
+  try {
+    domainMappings = JSON.parse(readFileSync(path, "utf-8"));
+    return domainMappings!;
+  } catch (e) {
+    console.warn("Failed to load domain-customer-mappings.json:", e);
+    domainMappings = {};
+    return domainMappings;
+  }
+}
+
+/**
+ * Find domain mapping with subdomain fallback
+ * e.g., "supplier.magna.com" → check "supplier.magna.com" → check "magna.com"
+ *
+ * Security: Only allows fallback for known safe subdomain patterns to prevent
+ * attacker.domain.com from matching domain.com
+ */
+function findDomainMapping(
+  domain: string,
+  mappings: Record<string, DomainMapping>
+): DomainMapping | null {
+  // Exact match first
+  if (mappings[domain]) return mappings[domain];
+
+  // Try parent domain (remove first segment) - but only for safe subdomain patterns
+  const parts = domain.split(".");
+  if (parts.length > 2) {
+    const subdomain = parts[0].toLowerCase();
+
+    // Only allow fallback for common business subdomain patterns
+    const safeSubdomains = [
+      "mail", "email", "smtp",
+      "sales", "orders", "purchasing",
+      "ap", "ar", "accounts", "accounting",
+      "portal", "secure", "b2b",
+      "supplier", "vendor", "customer",
+    ];
+
+    if (safeSubdomains.includes(subdomain)) {
+      const parent = parts.slice(1).join(".");
+      if (mappings[parent]) return mappings[parent];
+    }
+  }
+
+  return null;
+}
 
 export interface MatchResult {
   customerId: string;
   customerName: string;
   customerFullName: string;
   confidence: "exact" | "high" | "medium" | "low";
-  matchType: "email" | "name" | "company";
+  matchType: "email" | "name" | "company" | "domain_mapping";
   matchedValue: string;
 }
 
@@ -40,17 +110,34 @@ function normalizeForComparison(str: string): string {
 /**
  * Extract company name from email domain
  * e.g., "john@acme-tools.com" -> "acme tools"
+ * e.g., "orders@sales.customer-domain.ca" -> "customer domain"
+ *
+ * Correctly handles subdomains by extracting the main domain before TLD
  */
 function extractCompanyFromEmail(email: string): string | null {
-  const match = email.match(/@([^.]+)/);
-  if (!match) return null;
+  const atIndex = email.indexOf("@");
+  if (atIndex === -1) return null;
 
-  const domain = match[1];
-  // Skip common email providers
-  const genericDomains = ["gmail", "yahoo", "hotmail", "outlook", "aol", "icloud", "mail"];
-  if (genericDomains.includes(domain.toLowerCase())) return null;
+  const fullDomain = email.slice(atIndex + 1).toLowerCase();
+  const parts = fullDomain.split(".");
 
-  return domain.replace(/[-_]/g, " ").toLowerCase();
+  // Need at least domain + TLD (e.g., "example.com")
+  if (parts.length < 2) return null;
+
+  // Get the domain part (second to last) - handles subdomains like sales.customer.com
+  // For "sales.customer-domain.ca" → parts = ["sales", "customer-domain", "ca"]
+  // We want "customer-domain" (index length-2)
+  const domainPart = parts[parts.length - 2];
+
+  // Skip generic email providers
+  const genericDomains = [
+    "gmail", "yahoo", "hotmail", "outlook", "aol", "icloud", "mail",
+    "protonmail", "zoho", "yandex", "live", "msn"
+  ];
+  if (genericDomains.includes(domainPart)) return null;
+
+  // Convert hyphens/underscores to spaces for matching
+  return domainPart.replace(/[-_]/g, " ");
 }
 
 /**
@@ -139,6 +226,43 @@ export function createCustomerMatcher(client: ConductorClient): CustomerMatcher 
     const emailLower = contactEmail.toLowerCase();
     const companyFromEmail = extractCompanyFromEmail(contactEmail);
 
+    // 0. Domain mapping lookup (highest priority - explicit mappings)
+    const domain = contactEmail.split("@")[1]?.toLowerCase();
+    if (domain) {
+      const mappings = loadDomainMappings();
+      const mapping = findDomainMapping(domain, mappings);
+      if (mapping) {
+        // Support both single and multiple customer names
+        const customerNames = mapping.qbCustomerNames ||
+          (mapping.qbCustomerName ? [mapping.qbCustomerName] : []);
+
+        for (const qbName of customerNames) {
+          const customer = customers.find(
+            (c) => c.fullName === qbName || c.name === qbName
+          );
+          if (customer) {
+            results.push({
+              customerId: customer.id,
+              customerName: customer.name,
+              customerFullName: customer.fullName,
+              confidence: "high",
+              matchType: "domain_mapping",
+              matchedValue: domain,
+            });
+          } else {
+            console.warn(
+              `Domain mapping found for ${domain} -> "${qbName}" but QB customer not found`
+            );
+          }
+        }
+
+        // Return if we found any matches
+        if (results.length > 0) {
+          return results;
+        }
+      }
+    }
+
     for (const customer of customers) {
       // 1. Exact email match (highest confidence)
       if (customer.email && customer.email.toLowerCase() === emailLower) {
@@ -182,8 +306,17 @@ export function createCustomerMatcher(client: ConductorClient): CustomerMatcher 
         }
 
         // Fuzzy match with lower threshold
+        // Require minimum name length to prevent short name matches like "Inc" or "Co"
         const nameSim = stringSimilarity(contactName, customer.name);
+        const normalizedContactName = normalizeForComparison(contactName);
+        const normalizedCustomerName = normalizeForComparison(customer.name);
+        const hasMinNameLength = normalizedContactName.length >= 4 && normalizedCustomerName.length >= 4;
+
         if (nameSim >= 0.7) {
+          // Skip short names unless very high similarity
+          if (!hasMinNameLength && nameSim < 0.9) {
+            continue;
+          }
           results.push({
             customerId: customer.id,
             customerName: customer.name,
@@ -197,7 +330,14 @@ export function createCustomerMatcher(client: ConductorClient): CustomerMatcher 
 
         if (customer.companyName) {
           const companySim = stringSimilarity(contactName, customer.companyName);
+          const normalizedCompanyName = normalizeForComparison(customer.companyName);
+          const hasMinCompanyLength = normalizedContactName.length >= 4 && normalizedCompanyName.length >= 4;
+
           if (companySim >= 0.7) {
+            // Skip short names unless very high similarity
+            if (!hasMinCompanyLength && companySim < 0.9) {
+              continue;
+            }
             results.push({
               customerId: customer.id,
               customerName: customer.name,

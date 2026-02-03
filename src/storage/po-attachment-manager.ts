@@ -56,6 +56,12 @@ export interface FetchedPdf {
   originalFilename?: string; // For converted files (e.g., DOCX → PDF)
 }
 
+export interface PoValidationResult {
+  details: PoDetails | null;
+  isValidPo: boolean;
+  notPoReason: string | null;
+}
+
 // ============================================================
 // DOCX to PDF Conversion
 // ============================================================
@@ -252,6 +258,131 @@ export async function fetchPdfsFromImap(
   return results;
 }
 
+/**
+ * Fetch a specific attachment by filename from an email via IMAP.
+ * Unlike fetchPdfsFromImap() which fetches ALL PDFs, this only gets the requested file.
+ *
+ * @param uid - Email UID
+ * @param mailbox - Mailbox name
+ * @param targetFilename - The filename to fetch (case-insensitive match)
+ * @returns The fetched PDF or null if not found
+ */
+export async function fetchSpecificAttachment(
+  uid: number,
+  mailbox: string,
+  targetFilename: string
+): Promise<FetchedPdf | null> {
+  const client = createImapClient();
+  const lowerTarget = targetFilename.toLowerCase();
+
+  try {
+    await client.connect();
+    await client.mailboxOpen(mailbox, { readOnly: true });
+
+    const msg = await client.fetchOne(uid, { bodyStructure: true }, { uid: true });
+
+    if (!msg || !(msg as any).bodyStructure) {
+      return null;
+    }
+
+    const nodes = flattenBodyStructure((msg as any).bodyStructure);
+
+    for (const node of nodes) {
+      const contentType = `${node.type || ""}/${node.subtype || ""}`.toLowerCase();
+      const params = node.params || node.parameters || {};
+      const disposition = normalizeDisposition(node.disposition);
+      const filename = disposition.params?.filename || params.name || params.filename;
+
+      if (!filename) continue;
+
+      const lowerFilename = filename.toLowerCase();
+
+      // Check for match (exact or partial)
+      const isMatch =
+        lowerFilename === lowerTarget ||
+        lowerFilename.includes(lowerTarget) ||
+        lowerTarget.includes(lowerFilename);
+
+      if (!isMatch) continue;
+
+      const fileIsPdf = isPdf(filename, contentType);
+      const fileIsWord = isWordDoc(filename, contentType);
+
+      if ((fileIsPdf || fileIsWord) && node.part) {
+        const encoding = (node.encoding || "").toLowerCase();
+
+        try {
+          const rawContent = await fetchBodyPart(client, uid, node.part);
+          if (!rawContent) continue;
+
+          let content = rawContent;
+
+          // Decode base64 if needed
+          if (encoding === "base64") {
+            content = Buffer.from(rawContent.toString("ascii"), "base64");
+          } else {
+            // Try base64 decode as fallback
+            try {
+              const decoded = Buffer.from(rawContent.toString("ascii"), "base64");
+              if (decoded.length > 0 && decoded.length < rawContent.length) {
+                content = decoded;
+              }
+            } catch {
+              // Keep original
+            }
+          }
+
+          if (fileIsWord) {
+            // Convert Word doc to PDF
+            console.log(`  Converting Word to PDF: ${filename}`);
+            const pdfContent = await convertWordToPdf(content, filename || "document.docx");
+            if (pdfContent) {
+              const pdfFilename = (filename || "document.docx").replace(/\.(docx?|doc)$/i, ".pdf");
+              return {
+                filename: pdfFilename,
+                content: pdfContent,
+                contentType: "application/pdf",
+                originalFilename: filename,
+              };
+            }
+          } else {
+            // PDF - verify magic number
+            const first4 = content.slice(0, 4).toString("ascii");
+            if (first4 !== "%PDF") {
+              // Try one more base64 decode
+              try {
+                const decoded = Buffer.from(content.toString("ascii"), "base64");
+                if (decoded.slice(0, 4).toString("ascii") === "%PDF") {
+                  content = decoded;
+                }
+              } catch {
+                // Keep as is
+              }
+            }
+
+            return {
+              filename: filename || "attachment.pdf",
+              content,
+              contentType: "application/pdf",
+            };
+          }
+        } catch (error) {
+          console.error(`Failed to fetch attachment ${filename}:`, error);
+          return null;
+        }
+      }
+    }
+
+    return null;
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      // Ignore
+    }
+  }
+}
+
 // ============================================================
 // Storage Operations
 // ============================================================
@@ -404,6 +535,8 @@ export async function updateAttachmentAnalysis(
     poNumber: string | null;
     poTotal: number | null; // cents
     analysisJson: any;
+    isValidPo?: boolean;
+    notPoReason?: string | null;
   }
 ): Promise<void> {
   await db
@@ -413,6 +546,8 @@ export async function updateAttachmentAnalysis(
       poTotal: analysis.poTotal,
       analysisJson: analysis.analysisJson,
       analyzedAt: new Date(),
+      isValidPo: analysis.isValidPo ?? null,
+      notPoReason: analysis.notPoReason ?? null,
     })
     .where(eq(schema.poAttachments.id, attachmentId));
 }
@@ -447,16 +582,17 @@ export function getCachedAnalysis(attachment: PoAttachment): {
 // ============================================================
 
 /**
- * Analyze a PDF using Claude's visual document understanding
+ * Analyze a PDF using Claude's visual document understanding.
+ * Returns both PO details AND validation status.
  */
-async function analyzePdfWithVision(pdfBuffer: Buffer): Promise<PoDetails | null> {
+async function analyzePdfWithVision(pdfBuffer: Buffer): Promise<PoValidationResult> {
   const pdfBase64 = pdfBuffer.toString("base64");
 
   // Check size limit (32MB max for API, but be conservative)
   const sizeMB = pdfBuffer.length / (1024 * 1024);
   if (sizeMB > 25) {
     console.warn(`PDF too large for vision analysis: ${sizeMB.toFixed(1)}MB`);
-    return null;
+    return { details: null, isValidPo: false, notPoReason: "PDF too large for analysis" };
   }
 
   try {
@@ -477,10 +613,18 @@ async function analyzePdfWithVision(pdfBuffer: Buffer): Promise<PoDetails | null
             },
             {
               type: "text",
-              text: `Extract purchase order details from this document.
+              text: `Analyze this document and determine if it's a Purchase Order (PO).
+
+STEP 1: Determine document type
+- Is this a Purchase Order? Look for: PO number, "Purchase Order" header, ordered items with quantities
+- NOT a PO: Quotations, Invoices, Estimates, Terms & Conditions, Catalogs, Packing slips
+
+STEP 2: If it IS a PO, extract details
 
 Return JSON only:
 {
+  "isValidPo": true/false,
+  "notPoReason": "string explaining why not a PO, or null if it is a PO",
   "poNumber": "string or null",
   "vendor": "vendor/supplier name or null",
   "items": [{"description": "string", "quantity": number or null, "unitPrice": number or null, "lineTotal": number or null}],
@@ -488,7 +632,7 @@ Return JSON only:
   "currency": "USD"
 }
 
-If this is not a PO/invoice/quote, return: {"poNumber": null, "vendor": null, "items": [], "total": null, "currency": "USD"}`,
+Examples of notPoReason: "This is a quotation/estimate", "This is an invoice", "This is a terms and conditions document", "This is a product catalog"`,
             },
           ],
         },
@@ -497,16 +641,18 @@ If this is not a PO/invoice/quote, return: {"poNumber": null, "vendor": null, "i
 
     const content = response.content[0];
     if (content.type !== "text") {
-      return null;
+      return { details: null, isValidPo: false, notPoReason: "Unexpected response type from AI" };
     }
 
     const jsonMatch = content.text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.warn("No JSON found in Claude response");
-      return null;
+      return { details: null, isValidPo: false, notPoReason: "Failed to parse AI response" };
     }
 
     const result = JSON.parse(jsonMatch[0]) as {
+      isValidPo?: boolean;
+      notPoReason?: string | null;
       poNumber?: string | null;
       vendor?: string | null;
       items?: Array<{
@@ -519,7 +665,7 @@ If this is not a PO/invoice/quote, return: {"poNumber": null, "vendor": null, "i
       currency?: string;
     };
 
-    return {
+    const details: PoDetails = {
       poNumber: result.poNumber || null,
       vendor: result.vendor || null,
       items: (result.items || []).map((item) => ({
@@ -531,10 +677,25 @@ If this is not a PO/invoice/quote, return: {"poNumber": null, "vendor": null, "i
       total: result.total ?? null,
       currency: result.currency || "USD",
     };
+
+    return {
+      details: result.isValidPo ? details : null,
+      isValidPo: result.isValidPo ?? false,
+      notPoReason: result.notPoReason || null,
+    };
   } catch (error) {
     console.error("PDF vision analysis failed:", error);
-    return null;
+    return { details: null, isValidPo: false, notPoReason: "Analysis failed: " + String(error) };
   }
+}
+
+/**
+ * Legacy wrapper for backward compatibility - extracts just PO details
+ * @deprecated Use analyzePdfWithVision() directly for validation info
+ */
+async function analyzePdfWithVisionLegacy(pdfBuffer: Buffer): Promise<PoDetails | null> {
+  const result = await analyzePdfWithVision(pdfBuffer);
+  return result.details;
 }
 
 // ============================================================
@@ -543,7 +704,9 @@ If this is not a PO/invoice/quote, return: {"poNumber": null, "vendor": null, "i
 
 /**
  * Get PO details from an email's PDF attachments.
- * This is the main function to use - it handles:
+ * This is the LEGACY function - use smartPoDetection() for new code.
+ *
+ * This handles:
  * 1. Checking cache for existing analysis
  * 2. Fetching PDF from IMAP if not cached
  * 3. Storing PDF to Supabase
@@ -551,6 +714,8 @@ If this is not a PO/invoice/quote, return: {"poNumber": null, "vendor": null, "i
  * 5. Caching the results
  *
  * Returns the first successfully analyzed PDF's details.
+ *
+ * @deprecated Use smartPoDetection() from po-detector.ts instead
  */
 export async function getOrAnalyzePoPdf(
   email: Email,
@@ -562,9 +727,9 @@ export async function getOrAnalyzePoPdf(
     .from(schema.poAttachments)
     .where(eq(schema.poAttachments.emailId, email.id));
 
-  // Check for cached analysis
+  // Check for cached analysis (only valid POs)
   for (const att of existingAttachments) {
-    if (hasAnalysis(att) && att.analysisJson) {
+    if (hasAnalysis(att) && att.analysisJson && att.isValidPo !== false) {
       console.log(`  Using cached analysis for: ${att.filename}`);
       const cached = getCachedAnalysis(att);
       if (cached?.analysisJson) {
@@ -595,7 +760,7 @@ export async function getOrAnalyzePoPdf(
     }
 
     // Check if this stored attachment already has analysis (from previous store)
-    if (hasAnalysis(stored) && stored.analysisJson) {
+    if (hasAnalysis(stored) && stored.analysisJson && stored.isValidPo !== false) {
       console.log(`  Using cached analysis for: ${stored.filename}`);
       return {
         filename: stored.filename,
@@ -603,21 +768,45 @@ export async function getOrAnalyzePoPdf(
       };
     }
 
-    // Analyze with Claude
+    // Analyze with Claude (with validation)
     console.log(`  Analyzing PDF: ${pdf.filename} (${(pdf.content.length / 1024).toFixed(0)} KB)`);
-    const details = await analyzePdfWithVision(pdf.content);
+    const result = await analyzePdfWithVision(pdf.content);
 
-    if (details) {
-      // Cache the analysis
-      await updateAttachmentAnalysis(stored.id, {
-        poNumber: details.poNumber,
-        poTotal: details.total ? Math.round(details.total * 100) : null,
-        analysisJson: details,
-      });
+    // Cache the analysis (even if not a valid PO)
+    await updateAttachmentAnalysis(stored.id, {
+      poNumber: result.details?.poNumber || null,
+      poTotal: result.details?.total ? Math.round(result.details.total * 100) : null,
+      analysisJson: result.details,
+      isValidPo: result.isValidPo,
+      notPoReason: result.notPoReason,
+    });
 
-      return { filename: pdf.filename, details };
+    // Only return if it's a valid PO
+    if (result.isValidPo && result.details) {
+      return { filename: pdf.filename, details: result.details };
     }
   }
 
   return null;
+}
+
+/**
+ * Analyze and validate a single PDF buffer.
+ * Used by po-detector for smart detection flow.
+ */
+export async function analyzeAndValidatePo(
+  pdfBuffer: Buffer,
+  _context: { subject: string; sender: string }
+): Promise<PoValidationResult> {
+  return analyzePdfWithVision(pdfBuffer);
+}
+
+/**
+ * Get all attachments for a thread, including validation status
+ */
+export async function getThreadAttachments(threadKey: string): Promise<PoAttachment[]> {
+  return db
+    .select()
+    .from(schema.poAttachments)
+    .where(eq(schema.poAttachments.threadKey, threadKey));
 }

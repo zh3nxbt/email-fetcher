@@ -45,8 +45,25 @@ function parseRecipients(toAddresses: string | null): string[] {
 }
 
 /**
+ * Generic/webmail domains that should not be trusted just because we emailed them
+ * These could be personal accounts or shared mailboxes that don't represent trusted companies
+ */
+const GENERIC_DOMAINS = new Set([
+  // Major webmail providers
+  "gmail.com", "yahoo.com", "yahoo.ca", "hotmail.com", "outlook.com",
+  "aol.com", "icloud.com", "protonmail.com", "mail.com",
+  "live.com", "msn.com", "yandex.com", "zoho.com",
+  // Regional variants
+  "gmail.ca", "yahoo.co.uk", "hotmail.co.uk", "outlook.ca",
+  // Other common free email
+  "gmx.com", "gmx.net", "fastmail.com", "tutanota.com",
+]);
+
+/**
  * Get domains from sent email recipients in the database
  * These are domains we've actively communicated with
+ *
+ * Filters out generic webmail domains to prevent trusting personal accounts
  */
 async function getSentEmailDomains(): Promise<Set<string>> {
   const domains = new Set<string>();
@@ -61,7 +78,7 @@ async function getSentEmailDomains(): Promise<Set<string>> {
     const recipients = parseRecipients(email.toAddresses);
     for (const recipient of recipients) {
       const domain = extractDomain(recipient);
-      if (domain) {
+      if (domain && !GENERIC_DOMAINS.has(domain)) {
         domains.add(domain);
       }
     }
@@ -123,6 +140,36 @@ async function getQbCustomerDomains(): Promise<Set<string>> {
   return domains;
 }
 
+interface TrustedDomainsResult {
+  domains: Set<string>;
+  sentDomains: Set<string>;
+  manualDomains: Set<string>;
+  qbDomains: Set<string>;
+}
+
+/**
+ * Load trusted domains from all sources
+ * Single implementation shared by getTrustedDomains and getTrustedDomainsStats
+ */
+async function loadTrustedDomains(): Promise<TrustedDomainsResult> {
+  const [sentDomains, manualDomains, qbDomains] = await Promise.all([
+    getSentEmailDomains(),
+    Promise.resolve(getManualWhitelist()),
+    getQbCustomerDomains(),
+  ]);
+
+  // Combine all sets
+  const domains = new Set<string>(sentDomains);
+  for (const domain of manualDomains) {
+    domains.add(domain);
+  }
+  for (const domain of qbDomains) {
+    domains.add(domain);
+  }
+
+  return { domains, sentDomains, manualDomains, qbDomains };
+}
+
 /**
  * Build the complete set of trusted domains
  * Combines:
@@ -131,22 +178,7 @@ async function getQbCustomerDomains(): Promise<Set<string>> {
  * 3. Domains from QB customer emails (via cached list)
  */
 export async function getTrustedDomains(): Promise<Set<string>> {
-  const [sentDomains, manualDomains, qbDomains] = await Promise.all([
-    getSentEmailDomains(),
-    Promise.resolve(getManualWhitelist()),
-    getQbCustomerDomains(),
-  ]);
-
-  // Combine all sets
-  const trusted = new Set<string>(sentDomains);
-  for (const domain of manualDomains) {
-    trusted.add(domain);
-  }
-  for (const domain of qbDomains) {
-    trusted.add(domain);
-  }
-
-  return trusted;
+  return (await loadTrustedDomains()).domains;
 }
 
 /**
@@ -178,25 +210,13 @@ export async function getTrustedDomainsStats(): Promise<{
   fromQbCustomers: number;
   domains: string[];
 }> {
-  const [sentDomains, manualDomains, qbDomains] = await Promise.all([
-    getSentEmailDomains(),
-    Promise.resolve(getManualWhitelist()),
-    getQbCustomerDomains(),
-  ]);
-
-  const allDomains = new Set<string>(sentDomains);
-  for (const domain of manualDomains) {
-    allDomains.add(domain);
-  }
-  for (const domain of qbDomains) {
-    allDomains.add(domain);
-  }
+  const { domains, sentDomains, manualDomains, qbDomains } = await loadTrustedDomains();
 
   return {
-    totalTrusted: allDomains.size,
+    totalTrusted: domains.size,
     fromSentEmails: sentDomains.size,
     fromManualWhitelist: manualDomains.size,
     fromQbCustomers: qbDomains.size,
-    domains: Array.from(allDomains).sort(),
+    domains: Array.from(domains).sort(),
   };
 }

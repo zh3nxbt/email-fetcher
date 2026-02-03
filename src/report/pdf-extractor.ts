@@ -269,26 +269,6 @@ export async function extractPoDetailsFromThread(
   return null;
 }
 
-/**
- * Process all vendor threads to extract PO details
- */
-export async function enrichThreadsWithPoDetails(
-  threads: CategorizedThread[]
-): Promise<CategorizedThread[]> {
-  const enriched: CategorizedThread[] = [];
-
-  for (const thread of threads) {
-    if (thread.category === "vendor" && thread.itemType === "po_sent") {
-      console.log(`Extracting PO details for thread: ${thread.subject}`);
-      const poDetails = await extractPoDetailsFromThread(thread);
-      enriched.push({ ...thread, poDetails });
-    } else {
-      enriched.push(thread);
-    }
-  }
-
-  return enriched;
-}
 
 /**
  * Standalone function to analyze a PDF buffer

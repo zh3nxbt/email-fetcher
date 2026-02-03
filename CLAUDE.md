@@ -171,6 +171,56 @@ npm run report -- --date=2026-01-26
 
 Always add `process.exit(0)` at end of CLI scripts - database connection keeps Node process alive.
 
+### Database Migrations (Drizzle)
+
+**`npm run db:push` is broken** - drizzle-kit has a bug that crashes on this database. Use raw SQL instead:
+
+```typescript
+// Create a migration script (e.g., src/db/migrate-xyz.ts)
+import "dotenv/config";
+import { sql } from "drizzle-orm";
+import { db } from "./index.js";
+
+async function migrate() {
+  // Check if column exists before adding
+  const check = await db.execute(sql`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'your_table' AND column_name = 'new_column'
+  `);
+  const rows = Array.isArray(check) ? check : [];
+
+  if (rows.length === 0) {
+    await db.execute(sql`ALTER TABLE your_table ADD COLUMN new_column integer DEFAULT 0 NOT NULL`);
+    console.log("Added column");
+  } else {
+    console.log("Column already exists");
+  }
+
+  process.exit(0);
+}
+
+migrate().catch((e) => { console.error(e); process.exit(1); });
+```
+
+Run with: `npx tsx src/db/migrate-xyz.ts`
+
+**For enum values:**
+```typescript
+// Check if enum value exists
+const enumCheck = await db.execute(sql`
+  SELECT enumlabel FROM pg_enum
+  WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'your_enum_type')
+  AND enumlabel = 'new_value'
+`);
+const enumRows = Array.isArray(enumCheck) ? enumCheck : [];
+
+if (enumRows.length === 0) {
+  await db.execute(sql`ALTER TYPE your_enum_type ADD VALUE IF NOT EXISTS 'new_value'`);
+}
+```
+
+**Note:** `db.execute()` returns an array directly, not `{ rows: [] }`. Always use `Array.isArray(result) ? result : []` pattern.
+
 ### References Field
 
 `parsed.references` from mailparser can be string OR array:

@@ -16,10 +16,8 @@ export {
 } from "./trusted-domains.js";
 export {
   getCustomerJobDocuments,
-  getOpenSalesOrders,
   findMatchingSalesOrder,
   findMatchingEstimate,
-  getUnpaidInvoices,
   getJobDocumentsSummary,
 } from "./job-documents.js";
 export type {

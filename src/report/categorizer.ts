@@ -5,7 +5,7 @@ import { groupEmailsIntoThreads, normalizeSubject, fetchFullThreadEmails } from 
 import type { CategorizedThread, TimeWindow, EmailForPrompt } from "./types";
 import { categorizeThreadWithAI, categorizeThreadsBatch, type ThreadForBatch } from "./summarizer";
 import { getTrustedDomains, isDomainTrusted } from "@/quickbooks/trusted-domains";
-import { getOrAnalyzePoPdf } from "@/storage/po-attachment-manager";
+import { smartPoDetection } from "./po-detector";
 
 // Batch configuration
 const MAX_THREADS_PER_BATCH = 20;
@@ -478,7 +478,7 @@ export async function categorizeThreads(
 /**
  * Enrich po_received threads with:
  * 1. Trusted domain check (sets isSuspicious flag)
- * 2. PO details extraction from PDF (if domain is trusted)
+ * 2. Smart PO detection from attachments (if domain is trusted)
  */
 async function enrichPoReceivedThreads(threads: CategorizedThread[]): Promise<void> {
   const poReceivedThreads = threads.filter(t => t.itemType === "po_received");
@@ -506,23 +506,49 @@ async function enrichPoReceivedThreads(threads: CategorizedThread[]): Promise<vo
       continue;
     }
 
-    // Domain is trusted - extract PO details from PDF
-    const emailWithDoc = thread.emails.find((e) => {
+    // Domain is trusted - use smart PO detection
+    // Find the specific email that likely contains the PO
+    // (first inbound email with attachments in the thread)
+    const poEmail = thread.emails.find((e) => {
+      // Must be inbound (not from us)
+      const fromLower = e.fromAddress?.toLowerCase() || "";
+      const isInbound = !fromLower.includes("masprecisionparts.com") &&
+                        e.mailbox !== "Sent" &&
+                        e.mailbox !== "Sent Items";
+
+      if (!isInbound) return false;
+
+      // Must have document attachments
       if (!e.hasAttachments || !e.attachments) return false;
       const lower = e.attachments.toLowerCase();
       return lower.includes("pdf") || lower.includes(".doc");
     });
 
-    if (emailWithDoc) {
-      try {
-        const result = await getOrAnalyzePoPdf(emailWithDoc, thread.threadKey);
-        if (result) {
-          thread.poDetails = result.details;
-          console.log(`  Extracted PO: ${result.details.poNumber || "(no number)"} $${result.details.total || "?"}`);
+    if (!poEmail) {
+      console.log(`  No inbound email with attachments found for: "${thread.subject?.slice(0, 40)}..."`);
+      continue;
+    }
+
+    try {
+      const result = await smartPoDetection(poEmail, thread.threadKey, thread.subject);
+
+      if (result.success && result.primaryPo) {
+        thread.poDetails = result.primaryPo;
+        const poCount = result.poDetailsList.length;
+        if (poCount > 1) {
+          console.log(`  Extracted ${poCount} POs: ${result.poDetailsList.map(p => p.poNumber || "?").join(", ")}`);
+        } else {
+          console.log(`  Extracted PO: ${result.primaryPo.poNumber || "(no number)"} $${result.primaryPo.total || "?"}`);
         }
-      } catch (error) {
-        console.warn(`  Failed to analyze PDF for "${thread.subject?.slice(0, 40)}...":`, error);
+      } else if (!result.success) {
+        // No valid PO found - thread may need review
+        // The failure is already logged by smartPoDetection
+        console.log(`  No valid PO found in ${result.attemptedFiles.length} file(s) for: "${thread.subject?.slice(0, 40)}..."`);
+        // Keep itemType as po_received but poDetails will be null
+        // Templates will show warning based on this
       }
+    } catch (error) {
+      console.warn(`  Smart PO detection failed for "${thread.subject?.slice(0, 40)}...":`, error);
     }
   }
 }
