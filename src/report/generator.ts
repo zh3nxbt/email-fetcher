@@ -291,8 +291,12 @@ export async function generateDailySummary(options: ReportOptions = {}): Promise
     middayTodosWithStatus = middayTodosWithStatus.filter(t => !dismissedThreadKeys.has(t.threadKey));
   }
 
-  // Filter out new todos that are duplicates of midday todos (by threadKey)
-  const middayThreadKeys = new Set(middayTodosWithStatus.map(t => t.threadKey));
+  // Filter out new todos that are duplicates of UNRESOLVED midday todos (by threadKey)
+  // Resolved todos should NOT block new todos - if a thread changed state (e.g., quote_unanswered → po_received)
+  // we need to allow the new todo to be created
+  const middayThreadKeys = new Set(
+    middayTodosWithStatus.filter(t => !t.resolved).map(t => t.threadKey)
+  );
 
   const trulyNewTodos = newTodosRaw.filter(t =>
     !middayThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
@@ -423,8 +427,12 @@ export async function generateMorningReminder(options: ReportOptions = {}): Prom
     pendingTodos = pendingTodos.filter(t => !dismissedThreadKeys.has(t.threadKey));
   }
 
-  // Filter out duplicates (already in pending todos from yesterday)
-  const pendingThreadKeys = new Set(pendingTodos.map(t => t.threadKey));
+  // Filter out duplicates (already in UNRESOLVED pending todos from yesterday)
+  // Resolved todos should NOT block new todos - if a thread changed state (e.g., quote_unanswered → po_received)
+  // we need to allow the new todo to be created
+  const pendingThreadKeys = new Set(
+    pendingTodos.filter(t => !t.resolved).map(t => t.threadKey)
+  );
 
   const newOvernightTodos = overnightTodosRaw.filter(t =>
     !pendingThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
@@ -554,8 +562,12 @@ export async function generateMiddayReport(options: ReportOptions = {}): Promise
     pendingTodos = pendingTodos.filter(t => !dismissedThreadKeys.has(t.threadKey));
   }
 
-  // Filter out duplicates (already in pending todos from morning)
-  const pendingThreadKeys = new Set(pendingTodos.map(t => t.threadKey));
+  // Filter out duplicates (already in UNRESOLVED pending todos from morning)
+  // Resolved todos should NOT block new todos - if a thread changed state (e.g., quote_unanswered → po_received)
+  // we need to allow the new todo to be created
+  const pendingThreadKeys = new Set(
+    pendingTodos.filter(t => !t.resolved).map(t => t.threadKey)
+  );
 
   const newMorningTodos = morningTodosRaw.filter(t =>
     !pendingThreadKeys.has(t.threadKey) && !dismissedThreadKeys.has(t.threadKey)
