@@ -1,4 +1,5 @@
-import { pgTable, text, integer, serial, timestamp, boolean, date, jsonb, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, serial, timestamp, boolean, date, jsonb, pgEnum, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // Enums
 export const reportTypeEnum = pgEnum("email_report_type", ["daily_summary", "morning_reminder", "midday_report", "sync_check"]);
@@ -179,7 +180,22 @@ export const qbSyncAlerts = pgTable("qb_sync_alerts", {
 
   // Optimistic locking - prevents race conditions during concurrent updates
   version: integer("version").notNull().default(1),
-});
+}, (table) => ({
+  statusTypeDetectedIdx: index("qb_sync_alerts_status_type_detected_idx")
+    .on(table.status, table.alertType, table.detectedAt),
+  threadKeyIdx: index("qb_sync_alerts_thread_key_idx")
+    .on(table.threadKey),
+  salesOrderIdIdx: index("qb_sync_alerts_sales_order_id_idx")
+    .on(table.salesOrderId),
+  qbCustomerIdIdx: index("qb_sync_alerts_qb_customer_id_idx")
+    .on(table.qbCustomerId),
+  openThreadUnique: uniqueIndex("qb_sync_alerts_open_thread_unique")
+    .on(table.threadKey)
+    .where(sql`${table.status} = 'open' AND ${table.alertType} <> 'so_should_be_closed'`),
+  openSoUnique: uniqueIndex("qb_sync_alerts_open_so_unique")
+    .on(table.salesOrderId)
+    .where(sql`${table.status} = 'open' AND ${table.alertType} = 'so_should_be_closed' AND ${table.salesOrderId} IS NOT NULL`),
+}));
 
 // Type exports
 export type Email = typeof emails.$inferSelect;

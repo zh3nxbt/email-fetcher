@@ -7,6 +7,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { ConductorClient } from "./conductor-client.js";
+import { getCachedCustomers } from "./customer-cache.js";
 import type { QBCustomerMatch } from "./types.js";
 
 // ============================================================
@@ -212,7 +213,7 @@ export function createCustomerMatcher(client: ConductorClient): CustomerMatcher 
 
   async function ensureCache(): Promise<QBCustomerMatch[]> {
     if (!cachedCustomers) {
-      cachedCustomers = await client.getCustomerListForMatching();
+      cachedCustomers = await getCachedCustomers(client);
     }
     return cachedCustomers;
   }

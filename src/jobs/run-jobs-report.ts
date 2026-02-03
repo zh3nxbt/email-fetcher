@@ -10,10 +10,11 @@
 
 import "dotenv/config";
 import { toZonedTime, fromZonedTime } from "date-fns-tz";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 
 const JOBS_CHECK_KEY = "_jobs_check"; // Special key in email_sync_metadata
+const JOBS_LOCK_KEY = 839271; // Advisory lock to prevent concurrent jobs:check runs
 import { syncEmails } from "@/sync/syncer";
 import { categorizeThreads } from "@/report/categorizer";
 import type { TimeWindow, CategorizedThread } from "@/report/types";
@@ -122,6 +123,26 @@ async function saveJobCheckTime(timestamp: Date): Promise<void> {
 }
 
 /**
+ * Run a task under a Postgres advisory lock.
+ * Prevents concurrent jobs:check runs from creating duplicate alerts/emails.
+ */
+async function withJobsLock(task: () => Promise<void>): Promise<void> {
+  const result = await db.execute(sql`SELECT pg_try_advisory_lock(${JOBS_LOCK_KEY}) AS locked`);
+  const locked = Boolean((result as unknown as Array<{ locked: boolean }>)[0]?.locked);
+
+  if (!locked) {
+    console.warn("Another jobs:check process is already running. Skipping this run.");
+    return;
+  }
+
+  try {
+    await task();
+  } finally {
+    await db.execute(sql`SELECT pg_advisory_unlock(${JOBS_LOCK_KEY})`);
+  }
+}
+
+/**
  * Get hourly check window (from last check to now)
  * Falls back to 2 hours if no previous check recorded
  */
@@ -199,9 +220,8 @@ async function saveCategorizedThreads(
     })
     .returning({ id: schema.dailyReports.id });
 
-  // Save all threads
-  for (const thread of threads) {
-    await db.insert(schema.reportThreads).values({
+  // Save all threads in one insert (faster for historical runs)
+  const threadRows = threads.map((thread) => ({
       reportId: report.id,
       threadKey: thread.threadKey,
       category: thread.category,
@@ -212,7 +232,10 @@ async function saveCategorizedThreads(
       summary: thread.summary,
       emailCount: thread.emailCount,
       lastEmailDate: thread.lastEmailDate,
-    });
+    }));
+
+  if (threadRows.length > 0) {
+    await db.insert(schema.reportThreads).values(threadRows);
   }
 
   console.log(`Saved ${threads.length} categorized threads to report_threads (report ID: ${report.id})`);
@@ -469,13 +492,15 @@ async function main() {
   const options = parseArgs();
 
   try {
-    if (options.since) {
-      await runHistoricalCheck(options);
-    } else if (options.morning) {
-      await runMorningReview(options);
-    } else {
-      await runHourlyCheck(options);
-    }
+    await withJobsLock(async () => {
+      if (options.since) {
+        await runHistoricalCheck(options);
+      } else if (options.morning) {
+        await runMorningReview(options);
+      } else {
+        await runHourlyCheck(options);
+      }
+    });
     process.exit(0);
   } catch (error) {
     console.error("Alert check failed:", error);

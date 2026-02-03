@@ -10,18 +10,20 @@
 
 import { db, schema } from "@/db";
 import { eq, and, lt, isNull, inArray, sql } from "drizzle-orm";
-import type { QbSyncAlert, NewQbSyncAlert, QbSyncAlertType } from "@/db/schema";
-import type { CategorizedThread, PoDetails } from "@/report/types.js";
+import type { QbSyncAlert, NewQbSyncAlert } from "@/db/schema";
+import type { CategorizedThread } from "@/report/types.js";
 import { ConductorClient } from "@/quickbooks/conductor-client.js";
-import { createCustomerMatcher, type MatchResult } from "@/quickbooks/customer-matcher.js";
+import { createCustomerMatcher } from "@/quickbooks/customer-matcher.js";
 import {
+  type CustomerJobDocuments,
   getCustomerJobDocuments,
   findMatchingSalesOrder,
   findMatchingEstimate,
 } from "@/quickbooks/job-documents.js";
-import { findSosShouldBeClosed, findOverbilledMatches } from "@/quickbooks/invoice-so-matcher.js";
+import { findSosShouldBeClosed } from "@/quickbooks/invoice-so-matcher.js";
 
 const ESCALATION_HOURS = 4;
+type JobDocsCache = Map<string, Promise<CustomerJobDocuments>>;
 
 /**
  * Helper to safely create a ConductorClient
@@ -34,6 +36,23 @@ function getQbClient(): ConductorClient | null {
     console.warn("QB client not available:", error);
     return null;
   }
+}
+
+function getDocsFromCache(
+  client: ConductorClient,
+  customerId: string,
+  cache: JobDocsCache,
+  options: { includeFullyInvoiced?: boolean } = {}
+): Promise<CustomerJobDocuments> {
+  const cacheKey = options.includeFullyInvoiced ? `${customerId}::full` : customerId;
+  const existing = cache.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const promise = getCustomerJobDocuments(client, customerId, options);
+  cache.set(cacheKey, promise);
+  return promise;
 }
 
 export interface AlertSummary {
@@ -53,7 +72,8 @@ export interface AlertSummary {
  * - suspicious_po_email: Untrusted domain
  */
 export async function analyzeNewPoEmails(
-  poReceivedThreads: CategorizedThread[]
+  poReceivedThreads: CategorizedThread[],
+  docsCache: JobDocsCache = new Map()
 ): Promise<QbSyncAlert[]> {
   const newAlerts: QbSyncAlert[] = [];
 
@@ -149,7 +169,7 @@ export async function analyzeNewPoEmails(
 
     for (const candidate of allMatches) {
       try {
-        const docs = await getCustomerJobDocuments(client, candidate.customerId);
+        const docs = await getDocsFromCache(client, candidate.customerId, docsCache);
         const so = findMatchingSalesOrder(
           docs,
           poDetails?.poNumber || undefined,
@@ -230,7 +250,9 @@ export async function analyzeNewPoEmails(
  *
  * Converts po_detected → po_missing_so if SO hasn't been created
  */
-export async function checkEscalations(): Promise<QbSyncAlert[]> {
+export async function checkEscalations(
+  docsCache: JobDocsCache = new Map()
+): Promise<QbSyncAlert[]> {
   const escalations: QbSyncAlert[] = [];
 
   // Find po_detected alerts older than ESCALATION_HOURS
@@ -275,10 +297,19 @@ export async function checkEscalations(): Promise<QbSyncAlert[]> {
       .filter((id): id is string => id !== null)
   )];
 
-  const allDocs = new Map<string, Awaited<ReturnType<typeof getCustomerJobDocuments>>>();
-  for (const customerId of customerIds) {
-    const docs = await getCustomerJobDocuments(client, customerId);
-    allDocs.set(customerId, docs);
+  const allDocs = new Map<string, CustomerJobDocuments>();
+  const docsResults = await Promise.allSettled(
+    customerIds.map(async (customerId) => ({
+      customerId,
+      docs: await getDocsFromCache(client, customerId, docsCache),
+    }))
+  );
+  for (const result of docsResults) {
+    if (result.status === "fulfilled") {
+      allDocs.set(result.value.customerId, result.value.docs);
+    } else {
+      console.warn("Failed to prefetch customer docs for escalation:", result.reason);
+    }
   }
 
   for (const alert of candidateAlerts) {
@@ -328,7 +359,9 @@ export async function checkEscalations(): Promise<QbSyncAlert[]> {
 /**
  * Check for SOs that should be closed (fully invoiced but still open)
  */
-export async function checkInvoiceSoMismatch(): Promise<QbSyncAlert[]> {
+export async function checkInvoiceSoMismatch(
+  docsCache: JobDocsCache = new Map()
+): Promise<QbSyncAlert[]> {
   const alerts: QbSyncAlert[] = [];
 
   // Get unique QB customer IDs from recent po_detected_with_so alerts
@@ -353,25 +386,26 @@ export async function checkInvoiceSoMismatch(): Promise<QbSyncAlert[]> {
     return alerts;
   }
 
+  const existingSoAlerts = await db
+    .select({ salesOrderId: schema.qbSyncAlerts.salesOrderId })
+    .from(schema.qbSyncAlerts)
+    .where(eq(schema.qbSyncAlerts.alertType, "so_should_be_closed"));
+  const existingSoIds = new Set(
+    existingSoAlerts
+      .map((a) => a.salesOrderId)
+      .filter((id): id is string => Boolean(id))
+  );
+
   for (const customerId of customerIds) {
-    const docs = await getCustomerJobDocuments(client, customerId, { includeFullyInvoiced: true });
+    const docs = await getDocsFromCache(client, customerId, docsCache, {
+      includeFullyInvoiced: true,
+    });
 
     // Use PO# + total matching to find SOs that should be closed
     const sosShouldClose = findSosShouldBeClosed(docs.salesOrders, docs.invoices);
 
     for (const match of sosShouldClose) {
-      // Check if alert already exists
-      const existing = await db
-        .select()
-        .from(schema.qbSyncAlerts)
-        .where(
-          and(
-            eq(schema.qbSyncAlerts.alertType, "so_should_be_closed"),
-            eq(schema.qbSyncAlerts.salesOrderId, match.salesOrder.id)
-          )
-        );
-
-      if (existing.length > 0) {
+      if (existingSoIds.has(match.salesOrder.id)) {
         continue;
       }
 
@@ -396,6 +430,7 @@ export async function checkInvoiceSoMismatch(): Promise<QbSyncAlert[]> {
       });
 
       alerts.push(alert);
+      existingSoIds.add(match.salesOrder.id);
       console.log(
         `SO should be closed: ${match.salesOrder.refNumber} (Invoice ${match.invoice.refNumber})`
       );
@@ -408,7 +443,9 @@ export async function checkInvoiceSoMismatch(): Promise<QbSyncAlert[]> {
 /**
  * Auto-resolve alerts when SO/customer is added
  */
-export async function checkAndResolveAlerts(): Promise<QbSyncAlert[]> {
+export async function checkAndResolveAlerts(
+  docsCache: JobDocsCache = new Map()
+): Promise<QbSyncAlert[]> {
   const resolved: QbSyncAlert[] = [];
 
   const client = getQbClient();
@@ -427,10 +464,31 @@ export async function checkAndResolveAlerts(): Promise<QbSyncAlert[]> {
       )
     );
 
+  const poCustomerIds = [...new Set(
+    poAlerts
+      .map((a) => a.qbCustomerId)
+      .filter((id): id is string => Boolean(id))
+  )];
+  const poDocs = new Map<string, CustomerJobDocuments>();
+  const poDocsResults = await Promise.allSettled(
+    poCustomerIds.map(async (customerId) => ({
+      customerId,
+      docs: await getDocsFromCache(client, customerId, docsCache),
+    }))
+  );
+  for (const result of poDocsResults) {
+    if (result.status === "fulfilled") {
+      poDocs.set(result.value.customerId, result.value.docs);
+    } else {
+      console.warn("Failed to prefetch customer docs for resolution:", result.reason);
+    }
+  }
+
   for (const alert of poAlerts) {
     if (!alert.qbCustomerId) continue;
 
-    const docs = await getCustomerJobDocuments(client, alert.qbCustomerId);
+    const docs = poDocs.get(alert.qbCustomerId);
+    if (!docs) continue;
     const matchingSO = findMatchingSalesOrder(
       docs,
       alert.poNumber || undefined,
@@ -497,8 +555,8 @@ export async function getActionableAlerts(): Promise<QbSyncAlert[]> {
     .where(
       and(
         eq(schema.qbSyncAlerts.status, "open"),
-        // Either never notified or notified before today
-        isNull(schema.qbSyncAlerts.lastNotifiedAt)
+        // Either never notified or last notified before today
+        sql`(${schema.qbSyncAlerts.lastNotifiedAt} IS NULL OR ${schema.qbSyncAlerts.lastNotifiedAt} < ${today})`
       )
     );
 }
@@ -549,6 +607,7 @@ export async function runFullAlertCheck(
   poReceivedThreads: CategorizedThread[]
 ): Promise<AlertSummary> {
   console.log("\n=== Running QB Sync Alert Check ===\n");
+  const docsCache: JobDocsCache = new Map();
 
   let newAlerts: QbSyncAlert[] = [];
   let escalations: QbSyncAlert[] = [];
@@ -558,7 +617,7 @@ export async function runFullAlertCheck(
   // Stage 1: Analyze new PO emails
   try {
     console.log("Stage 1: Analyzing new PO emails...");
-    newAlerts = await analyzeNewPoEmails(poReceivedThreads);
+    newAlerts = await analyzeNewPoEmails(poReceivedThreads, docsCache);
     console.log(`  Created ${newAlerts.length} new alerts`);
   } catch (error) {
     console.error("Stage 1 failed:", error);
@@ -567,7 +626,7 @@ export async function runFullAlertCheck(
   // Stage 2: Check for escalations
   try {
     console.log("\nStage 2: Checking for escalations...");
-    escalations = await checkEscalations();
+    escalations = await checkEscalations(docsCache);
     console.log(`  Escalated ${escalations.length} alerts`);
   } catch (error) {
     console.error("Stage 2 failed:", error);
@@ -576,7 +635,7 @@ export async function runFullAlertCheck(
   // Stage 3: Check for auto-resolution
   try {
     console.log("\nChecking for auto-resolution...");
-    resolved = await checkAndResolveAlerts();
+    resolved = await checkAndResolveAlerts(docsCache);
     console.log(`  Resolved ${resolved.length} alerts`);
   } catch (error) {
     console.error("Stage 3 failed:", error);
@@ -585,7 +644,7 @@ export async function runFullAlertCheck(
   // Stage 4: Check for SO/Invoice mismatches
   try {
     console.log("\nChecking for SO/Invoice mismatches...");
-    soAlerts = await checkInvoiceSoMismatch();
+    soAlerts = await checkInvoiceSoMismatch(docsCache);
     console.log(`  Found ${soAlerts.length} SOs that should be closed`);
   } catch (error) {
     console.error("Stage 4 failed:", error);
@@ -605,8 +664,57 @@ export async function runFullAlertCheck(
 // Helper functions
 
 async function createAlert(data: NewQbSyncAlert): Promise<QbSyncAlert> {
-  const [alert] = await db.insert(schema.qbSyncAlerts).values(data).returning();
-  return alert;
+  try {
+    const [alert] = await db.insert(schema.qbSyncAlerts).values(data).returning();
+    return alert;
+  } catch (error) {
+    if (!isUniqueViolation(error)) {
+      throw error;
+    }
+
+    const existing = await findExistingOpenAlert(data);
+    if (existing) {
+      return existing;
+    }
+
+    throw error;
+  }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: string }).code === "23505";
+}
+
+async function findExistingOpenAlert(data: NewQbSyncAlert): Promise<QbSyncAlert | null> {
+  if (data.alertType === "so_should_be_closed" && data.salesOrderId) {
+    const existing = await db
+      .select()
+      .from(schema.qbSyncAlerts)
+      .where(
+        and(
+          eq(schema.qbSyncAlerts.alertType, "so_should_be_closed"),
+          eq(schema.qbSyncAlerts.salesOrderId, data.salesOrderId),
+          eq(schema.qbSyncAlerts.status, "open")
+        )
+      )
+      .limit(1);
+    return existing[0] ?? null;
+  }
+
+  const existing = await db
+    .select()
+    .from(schema.qbSyncAlerts)
+    .where(
+      and(
+        eq(schema.qbSyncAlerts.threadKey, data.threadKey),
+        eq(schema.qbSyncAlerts.status, "open")
+      )
+    )
+    .limit(1);
+  return existing[0] ?? null;
 }
 
 async function escalateAlert(alert: QbSyncAlert): Promise<QbSyncAlert | null> {

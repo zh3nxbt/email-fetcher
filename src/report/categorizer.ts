@@ -512,7 +512,7 @@ async function enrichPoReceivedThreads(threads: CategorizedThread[]): Promise<vo
     const poEmail = thread.emails.find((e) => {
       // Must be inbound (not from us)
       const fromLower = e.fromAddress?.toLowerCase() || "";
-      const isInbound = !fromLower.includes("masprecisionparts.com") &&
+      const isInbound = !fromLower.includes(OUR_DOMAIN) &&
                         e.mailbox !== "Sent" &&
                         e.mailbox !== "Sent Items";
 
