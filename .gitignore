@@ -24,3 +24,4 @@ drizzle/
 
 # Windows artifacts
 nul
+tsconfig.tsbuildinfo
