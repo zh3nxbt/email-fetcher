@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { ImapFlow } from "imapflow";
-import { simpleParser } from "mailparser";
+import { simpleParser, ParsedMail } from "mailparser";
 import { createImapClient } from "@/imap/client";
 import { extractAttachments } from "@/imap/parsers";
 import { db, schema } from "@/db";
@@ -8,6 +8,47 @@ import { eq, and, inArray } from "drizzle-orm";
 import type { NewEmail } from "@/db/schema";
 
 const MAILBOXES = ["INBOX", "Sent", "Sent Messages"];
+
+/**
+ * Extract the received date from email headers.
+ * Uses the first Received header (topmost = when our mail server received it).
+ * Falls back to Date header if no Received header found.
+ *
+ * This is important because there can be significant delays between when
+ * an email is sent (Date header) and when it arrives (Received header).
+ */
+function getReceivedDate(parsed: ParsedMail): Date | null {
+  // Try to get the Received header(s)
+  const received = parsed.headers.get("received");
+
+  if (received) {
+    // Received can be a string, array, or other types - we need a string
+    let firstReceived: string | null = null;
+
+    if (Array.isArray(received)) {
+      firstReceived = typeof received[0] === "string" ? received[0] : null;
+    } else if (typeof received === "string") {
+      firstReceived = received;
+    }
+
+    if (firstReceived) {
+      // Received header format: "from ... by ... ; <date>"
+      // The date is after the semicolon
+      const semicolonIndex = firstReceived.lastIndexOf(";");
+      if (semicolonIndex !== -1) {
+        const dateStr = firstReceived.substring(semicolonIndex + 1).trim();
+        const receivedDate = new Date(dateStr);
+
+        if (!isNaN(receivedDate.getTime())) {
+          return receivedDate;
+        }
+      }
+    }
+  }
+
+  // Fall back to Date header
+  return parsed.date || null;
+}
 // Initial sync date - only used on first run
 // Jan 1, 2026 00:00 EST = Jan 1, 2026 05:00 UTC
 const INITIAL_SYNC_DATE = new Date("2026-01-01T05:00:00.000Z");
@@ -127,6 +168,9 @@ async function syncMailbox(
         // Get body text (prefer plain text, fall back to html-to-text conversion would happen in parsed.text)
         const bodyText = parsed.text || "";
 
+        // Get the received date (when email arrived at our server, not when it was sent)
+        const emailDate = getReceivedDate(parsed);
+
         // Prepare email record
         const newEmail: NewEmail = {
           uid,
@@ -138,7 +182,7 @@ async function syncMailbox(
           ),
           subject: parsed.subject || null,
           bodyText: bodyText.slice(0, 50000),
-          date: parsed.date || null,
+          date: emailDate,
           inReplyTo: parsed.inReplyTo || null,
           references: Array.isArray(parsed.references)
             ? parsed.references.join(" ")
