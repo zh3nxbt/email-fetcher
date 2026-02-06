@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Category, ItemType } from "@/db/schema";
 import type { EmailForPrompt, CategorizationResult, PoExtractionResult, PoLineItem } from "./types";
+import { loadCorrectionsForPrompt } from "@/dashboard/todo-sync";
 
 const anthropic = new Anthropic();
 
@@ -106,6 +107,15 @@ async function categorizeWithModel(
     };
   });
 
+  // Load AI corrections to inject as few-shot examples
+  let correctionsBlock = "";
+  try {
+    correctionsBlock = await loadCorrectionsForPrompt(20);
+  } catch (err) {
+    // Non-critical — continue without corrections
+    console.warn("Failed to load AI corrections for prompt:", err);
+  }
+
   const prompt = `You are classifying email threads for MAS Precision Parts, a precision manufacturing company.
 
 ABOUT US:
@@ -149,7 +159,7 @@ CLASSIFICATION:
 5. SUMMARY - 1-2 sentence summary of thread status
 
 6. RELATED_TO - Index of related thread if this is a response (e.g., vendor quote responding to our RFQ)
-
+${correctionsBlock}
 THREADS TO CLASSIFY:
 ${JSON.stringify(threadsJson, null, 2)}
 

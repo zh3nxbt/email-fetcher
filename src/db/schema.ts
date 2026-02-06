@@ -132,6 +132,88 @@ export const poAttachments = pgTable("email_po_attachments", {
   notPoReason: text("not_po_reason"), // Why it's not a PO (e.g., "This is a quotation")
 });
 
+// Dashboard enums
+export const dashTodoStatusEnum = pgEnum("dash_todo_status", ["open", "resolved", "dismissed"]);
+
+// Dashboard Todos - standalone action items decoupled from reports
+export const dashTodos = pgTable("dash_todos", {
+  id: serial("id").primaryKey(),
+  threadKey: text("thread_key").notNull().unique(),  // One active todo per thread
+  todoType: todoTypeEnum("todo_type").notNull(),
+  category: categoryEnum("category").notNull(),
+  itemType: itemTypeEnum("item_type").notNull(),
+
+  // Contact
+  contactEmail: text("contact_email"),
+  contactName: text("contact_name"),
+  subject: text("subject"),
+  summary: text("summary"),          // AI-generated
+  description: text("description"),  // Human-readable action description
+
+  // Thread info
+  firstDetectedAt: timestamp("first_detected_at").notNull(),
+  lastEmailDate: timestamp("last_email_date"),
+  emailCount: integer("email_count").default(0),
+  needsResponse: boolean("needs_response").default(true),
+  lastEmailFromUs: boolean("last_email_from_us").default(false),
+
+  // Status
+  status: dashTodoStatusEnum("status").notNull().default("open"),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: text("resolved_by"),  // 'manual' | 'email_activity' | 'auto'
+
+  // Enrichment
+  poDetails: jsonb("po_details"),       // { poNumber, total, items, vendor }
+  isSuspicious: boolean("is_suspicious").default(false),
+
+  // AI correction tracking
+  aiCorrected: boolean("ai_corrected").default(false),
+  originalCategory: categoryEnum("original_category"),
+  originalItemType: itemTypeEnum("original_item_type"),
+
+  // QB link
+  qbAlertId: integer("qb_alert_id").references(() => qbSyncAlerts.id),
+
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (table) => ({
+  statusIdx: index("dash_todos_status_idx").on(table.status, table.firstDetectedAt),
+  threadKeyIdx: index("dash_todos_thread_key_idx").on(table.threadKey),
+  categoryIdx: index("dash_todos_category_idx").on(table.category),
+}));
+
+// AI Corrections - records when user corrects AI classification
+export const dashAiCorrections = pgTable("dash_ai_corrections", {
+  id: serial("id").primaryKey(),
+  threadKey: text("thread_key").notNull(),
+  fieldCorrected: text("field_corrected").notNull(),     // 'category' | 'item_type' | 'needs_response' | 'contact_name'
+  originalValue: text("original_value").notNull(),
+  correctedValue: text("corrected_value").notNull(),
+  correctedBy: text("corrected_by").default("user"),
+  correctedAt: timestamp("corrected_at").notNull().defaultNow(),
+  appliedToFuture: boolean("applied_to_future").default(true),  // Whether injected into future AI prompts
+  notes: text("notes"),
+}, (table) => ({
+  fieldIdx: index("dash_ai_corrections_field_idx").on(table.fieldCorrected, table.correctedAt),
+  threadKeyIdx: index("dash_ai_corrections_thread_key_idx").on(table.threadKey),
+}));
+
+// QB Write Log - audit trail for all QB write operations from dashboard
+export const qbWriteLog = pgTable("qb_write_log", {
+  id: serial("id").primaryKey(),
+  operation: text("operation").notNull(),       // 'create_so' | 'close_so' | 'create_invoice'
+  qbObjectType: text("qb_object_type").notNull(),  // 'sales_order' | 'invoice'
+  qbObjectId: text("qb_object_id"),
+  qbRefNumber: text("qb_ref_number"),
+  inputData: jsonb("input_data"),
+  responseData: jsonb("response_data"),
+  triggeredBy: text("triggered_by").default("dashboard"),
+  alertId: integer("alert_id").references(() => qbSyncAlerts.id),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  success: boolean("success").notNull().default(true),
+  errorMessage: text("error_message"),
+});
+
 // QB Sync Alerts - persists alerts for historical tracking and dashboard UI
 export const qbSyncAlerts = pgTable("qb_sync_alerts", {
   id: serial("id").primaryKey(),
@@ -215,9 +297,17 @@ export type NewQbSyncAlert = typeof qbSyncAlerts.$inferInsert;
 export type PoAttachment = typeof poAttachments.$inferSelect;
 export type NewPoAttachment = typeof poAttachments.$inferInsert;
 
+export type DashTodo = typeof dashTodos.$inferSelect;
+export type NewDashTodo = typeof dashTodos.$inferInsert;
+export type DashAiCorrection = typeof dashAiCorrections.$inferSelect;
+export type NewDashAiCorrection = typeof dashAiCorrections.$inferInsert;
+export type QbWriteLogEntry = typeof qbWriteLog.$inferSelect;
+export type NewQbWriteLogEntry = typeof qbWriteLog.$inferInsert;
+
 export type ReportType = "daily_summary" | "morning_reminder" | "midday_report" | "sync_check";
 export type Category = "customer" | "vendor" | "other";
 export type ItemType = "po_sent" | "po_received" | "quote_request" | "general" | "other";
 export type TodoType = "po_unacknowledged" | "quote_unanswered" | "general_unanswered" | "vendor_followup";
+export type DashTodoStatus = "open" | "resolved" | "dismissed";
 export type QbSyncAlertType = "po_detected" | "po_detected_with_so" | "no_qb_customer" | "suspicious_po_email" | "po_missing_so" | "so_should_be_closed";
 export type QbAlertStatus = "open" | "resolved" | "dismissed";
