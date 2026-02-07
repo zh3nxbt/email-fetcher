@@ -25,3 +25,9 @@ drizzle/
 # Windows artifacts
 nul
 tsconfig.tsbuildinfo
+
+# Debug/temp files
+debug-*.txt
+debug-*.mjs
+temp-*.ts
+verify-*.mjs
